@@ -1,49 +1,50 @@
 #include "arch/mod.h"
 #include "lib/mod.h"
 #include "mem/mod.h"
+#include "trap/mod.h"
 
+// CPU 0 完成共享初始化后，将started设为1通知其他CPU
 volatile static int started = 0;
 
 int main()
 {
     int cpuid = r_tp();
 
-    if(cpuid == 0) {
-
+    if (cpuid == 0)
+    {
+        // 只由CPU 0完成一次的内核共享初始化
         print_init();
         pmem_init();
         kvm_init();
-        kvm_inithart();
+        trap_kernel_init();
 
         printf("cpu %d is booting!\n", cpuid);
+
+        // 先保证上述初始化对其他CPU可见，再发布started
         __sync_synchronize();
-        // started = 1;
-
-        pgtbl_t test_pgtbl = pmem_alloc(true);
-        uint64 mem[5];
-        for(int i = 0; i < 5; i++)
-            mem[i] = (uint64)pmem_alloc(false);
-
-        printf("\ntest-1\n\n");    
-        vm_mappages(test_pgtbl, 0, mem[0], PGSIZE, PTE_R);
-        vm_mappages(test_pgtbl, PGSIZE * 10, mem[1], PGSIZE / 2, PTE_R | PTE_W);
-        vm_mappages(test_pgtbl, PGSIZE * 512, mem[2], PGSIZE - 1, PTE_R | PTE_X);
-        vm_mappages(test_pgtbl, PGSIZE * 512 * 512, mem[2], PGSIZE, PTE_R | PTE_X);
-        vm_mappages(test_pgtbl, VA_MAX - PGSIZE, mem[4], PGSIZE, PTE_W);
-        vm_print(test_pgtbl);
-
-        printf("\ntest-2\n\n");    
-        vm_mappages(test_pgtbl, 0, mem[0], PGSIZE, PTE_W);
-        vm_unmappages(test_pgtbl, PGSIZE * 10, PGSIZE, true);
-        vm_unmappages(test_pgtbl, PGSIZE * 512, PGSIZE, true);
-        vm_print(test_pgtbl);
-
-    } else {
-
-        while(started == 0);
-        __sync_synchronize();
-        printf("cpu %d is booting!\n", cpuid);
-         
+        started = 1;
     }
-    while (1);    
+    else
+    {
+        // CPU 1等待CPU 0完成共享资源初始化
+        while (started == 0)
+            ;
+
+        // 读取started后重新同步，确保看到CPU 0初始化后的内存状态
+        __sync_synchronize();
+    }
+
+    // 每个hart都需要切换到内核页表
+    kvm_inithart();
+
+    // 每个hart都设置自己的PLIC、stvec并打开S-mode全局中断
+    trap_kernel_inithart();
+
+    // CPU 0已经输出过启动信息，CPU 1在完成自身初始化后再输出
+    if (cpuid != 0)
+        printf("cpu %d is booting!\n", cpuid);
+
+    // 当前没有调度器和进程，内核保持运行以等待中断
+    while (1)
+        ;
 }

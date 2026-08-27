@@ -1,4 +1,5 @@
 #include "../arch/mod.h"
+#include "../trap/mod.h"
 
 // 每个CPU在运行操作系统时需要一个初始的函数栈
 __attribute__((aligned(16))) uint8 CPU_stack[4096 * NCPU];
@@ -14,7 +15,14 @@ void start()
     // 所以需要将hartid存到可访问的寄存器tp
     int id = r_mhartid();
     w_tp(id);
-
+    // 将可委托的异常交给S-mode处理
+    w_medeleg(0xffff);
+    // 将可委托的中断交给S-mode处理
+    w_mideleg(0xffff);
+    // 允许S-mode接收外设、时钟和软件中断
+    w_sie(r_sie() | SIE_SEIE | SIE_STIE | SIE_SSIE);
+    // 当前仍处于M-mode：为本hart设置时钟中断入口和下一次触发时间
+    timer_init();
     // 修改mstatus寄存器，假装上一个状态是S-mode
     uint64 status = r_mstatus();
     status &= ~MSTATUS_MPP_MASK;
