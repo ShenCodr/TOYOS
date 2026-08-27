@@ -60,13 +60,34 @@ int uart_getc_sync(void)
 }
 
 // 中断处理(键盘输入->屏幕输出)
+// 中断处理：读取UART接收队列中的所有字符，并回显到屏幕
 void uart_intr(void)
 {
-	while (1)
-	{
-		int c = uart_getc_sync();
-		if (c == -1)
-		break;
-		uart_putc_sync(c);
-	}
+    while (1)
+    {
+        int c = uart_getc_sync();
+
+        // 接收队列为空，当前UART中断处理结束
+        if (c == -1)
+            break;
+
+        // Enter通常以回车符'\r'到达UART，统一显示为换行
+        if (c == '\r' || c == '\n')
+        {
+            uart_putc_sync('\n');
+        }
+        // 不同终端可能把Backspace发送为'\b'或0x7f
+        else if (c == '\b' || c == 0x7f)
+        {
+            // 光标左移 → 用空格覆盖字符 → 再左移，形成视觉删除效果
+            uart_putc_sync('\b');
+            uart_putc_sync(' ');
+            uart_putc_sync('\b');
+        }
+        else
+        {
+            // 普通字符直接回显
+            uart_putc_sync(c);
+        }
+    }
 }
