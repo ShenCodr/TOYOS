@@ -18,6 +18,7 @@ int main()
         pmem_init();
         kvm_init();
         trap_kernel_init();
+        mmap_init(); // 初始化全局 mmap_region 节点仓库
 
         printf("cpu %d is booting!\n", cpuid);
 
