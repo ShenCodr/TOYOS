@@ -1,5 +1,4 @@
 #include "mod.h"
-#include "../../user/syscall_num.h"
 
 // in trampoline.S
 extern char trampoline[];  // 内核和用户切换的代码
@@ -55,17 +54,15 @@ void trap_user_handler()
     }
     else
     {
-        // 异常：Lab-4 只处理 U-mode 发出的 ecall
+        // 异常：处理用户态系统调用
         switch (trap_id)
         {
         case 8:
-            // ecall 长度为 4 字节，返回时跳过它以避免重复陷入
+            // 跳过已经执行的 ecall，避免返回用户态后再次陷入
             proc->tf->user_to_kern_epc += 4;
 
-            if (proc->tf->a7 == SYS_helloworld)
-                printf("proczero: hello world!\n");
-            else
-                panic("trap_user_handler: unknown syscall");
+            // 根据 a7 中的系统调用号分发，并把返回值写回 a0
+            syscall();
             break;
 
         default:

@@ -55,6 +55,7 @@ void proc_make_first()
 {
     // 设置第一个用户进程的身份，并分配保存用户寄存器的 trapframe
     proczero.pid = 0;
+    proczero.mmap = NULL; // 新进程尚未分配任何 mmap 区域
     proczero.tf = (trapframe_t *)pmem_alloc(false);
     assert(proczero.tf != NULL, "proc_make_first: alloc trapframe failed");
 
