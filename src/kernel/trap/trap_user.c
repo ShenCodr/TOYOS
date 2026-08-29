@@ -54,7 +54,7 @@ void trap_user_handler()
     }
     else
     {
-        // 异常：处理用户态系统调用
+        // 异常：处理用户态系统调用和栈缺页
         switch (trap_id)
         {
         case 8:
@@ -64,7 +64,28 @@ void trap_user_handler()
             // 根据 a7 中的系统调用号分发，并把返回值写回 a0
             syscall();
             break;
+                case 13:
+        case 15:
+        {
+            uint64 old_npage = proc->ustack_npage;
+            uint64 new_npage = uvm_ustack_grow(proc->pgtbl,
+                                               old_npage,
+                                               stval);
 
+            if (new_npage == (uint64)-1)
+            {
+                printf("illegal user page fault: trap_id = %d, stval = %p\n",
+                       trap_id, stval);
+                panic("trap_user_handler: stack grow failed");
+            }
+
+            printf("page fault occurred! trap id = %d\n", trap_id);
+            printf("ustack_npage: %d -> %d\n",
+                   (int)old_npage, (int)new_npage);
+
+            proc->ustack_npage = new_npage;
+            break;
+        }
         default:
             printf("\nunexpected user exception: %s\n", exception_info[trap_id]);
             printf("trap_id = %d, sepc = %p, stval = %p\n",

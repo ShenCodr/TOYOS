@@ -196,25 +196,117 @@ void uvm_munmap(uint64 begin, uint32 npages)
 /*------------------part-3: 用户空间heap和stack管理相关------------------*/
 
 // 用户堆空间增加, 返回新的堆顶地址 (注意栈顶最大值限制)
-uint64 uvm_heap_grow(pgtbl_t pgtbl, uint64 cur_heap_top, uint32 len) 
+uint64 uvm_heap_grow(pgtbl_t pgtbl, uint64 cur_heap_top, uint32 len)
 {
-    // TODO: Task 2 实现用户堆扩张
-    return (uint64)-1;
+    uint64 new_heap_top;
+    uint64 map_begin;
+    uint64 map_end;
+    uint64 page;
+
+    if (len == 0)
+        return cur_heap_top;
+
+    // 堆从 USER_BASE 向高地址增长，不能进入 mmap 区域
+    if (cur_heap_top < USER_BASE || cur_heap_top > MMAP_BEGIN)
+        return (uint64)-1;
+    if ((uint64)len > MMAP_BEGIN - cur_heap_top)
+        return (uint64)-1;
+
+    new_heap_top = cur_heap_top + len;
+
+    // 只为新覆盖到的完整虚拟页建立映射
+    map_begin = cur_heap_top;
+    if (map_begin % PGSIZE != 0)
+        map_begin += PGSIZE - map_begin % PGSIZE;
+
+    map_end = new_heap_top;
+    if (map_end % PGSIZE != 0)
+        map_end += PGSIZE - map_end % PGSIZE;
+
+    for (uint64 va = map_begin; va < map_end; va += PGSIZE)
+    {
+        page = (uint64)pmem_alloc(false);
+        vm_mappages(pgtbl, va, page, PGSIZE,
+                    PTE_R | PTE_W | PTE_U);
+    }
+
+    return new_heap_top;
 }
 
 // 用户堆空间减少, 返回新的堆顶地址
 uint64 uvm_heap_ungrow(pgtbl_t pgtbl, uint64 cur_heap_top, uint32 len)
 {
-    // TODO: Task 2 实现用户堆收缩
-    return (uint64)-1;
+    uint64 heap_bottom = USER_BASE + PGSIZE;
+    uint64 new_heap_top;
+    uint64 old_map_end;
+    uint64 new_map_end;
+
+    if (len == 0)
+        return cur_heap_top;
+
+    // initcode 所在页面不能作为堆空间释放
+    if (cur_heap_top < heap_bottom || cur_heap_top > MMAP_BEGIN)
+        return (uint64)-1;
+    if ((uint64)len > cur_heap_top - heap_bottom)
+        return (uint64)-1;
+
+    new_heap_top = cur_heap_top - len;
+
+    // 计算收缩前后仍需保留到哪个页面
+    old_map_end = cur_heap_top;
+    if (old_map_end % PGSIZE != 0)
+        old_map_end += PGSIZE - old_map_end % PGSIZE;
+
+    new_map_end = new_heap_top;
+    if (new_map_end % PGSIZE != 0)
+        new_map_end += PGSIZE - new_map_end % PGSIZE;
+
+    // 解除已经完全落到新堆顶之外的页面，并归还物理页
+    if (new_map_end < old_map_end)
+    {
+        vm_unmappages(pgtbl,
+                      new_map_end,
+                      old_map_end - new_map_end,
+                      true);
+    }
+
+    return new_heap_top;
 }
 
 // 处理函数栈增长导致的page fault事件
 // 成功返回new_ustack_npage，失败返回-1
-uint64 uvm_ustack_grow(pgtbl_t pgtbl, uint64 old_ustack_npage, uint64 fault_addr)
+uint64 uvm_ustack_grow(pgtbl_t pgtbl, uint64 old_ustack_npage,
+                       uint64 fault_addr)
 {
-    // TODO: Task 2 实现缺页驱动的用户栈增长
-    return (uint64)-1;
+    uint64 old_stack_bottom;
+    uint64 new_stack_bottom;
+    uint64 page;
+    uint64 max_stack_npage = (TRAPFRAME - MMAP_END) / PGSIZE;
+
+    // 当前栈状态必须有效
+    if (old_ustack_npage == 0 ||
+        old_ustack_npage > max_stack_npage)
+        return (uint64)-1;
+
+    old_stack_bottom = TRAPFRAME - old_ustack_npage * PGSIZE;
+
+    // 缺页地址必须位于当前栈下方，并且不能进入 mmap 区域
+    if (fault_addr < MMAP_END || fault_addr >= old_stack_bottom)
+        return (uint64)-1;
+
+    new_stack_bottom = fault_addr - fault_addr % PGSIZE;
+
+    // 一次缺页可能跨过多个尚未映射的栈页面
+    for (uint64 va = new_stack_bottom;
+         va < old_stack_bottom;
+         va += PGSIZE)
+    {
+        page = (uint64)pmem_alloc(false);
+        vm_mappages(pgtbl, va, page, PGSIZE,
+                    PTE_R | PTE_W | PTE_U);
+    }
+
+    return (TRAPFRAME - new_stack_bottom) / PGSIZE;
 }
 
 /*----------------------part-4: 用户页表管理相关----------------------*/

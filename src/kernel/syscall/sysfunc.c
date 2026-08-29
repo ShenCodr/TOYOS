@@ -70,9 +70,61 @@ uint64 sys_copyinstr()
 */
 uint64 sys_brk()
 {
-    return -1;
-}
+    proc_t *p = myproc();
+    uint64 new_heap_top;
+    uint64 ret_heap_top;
+    uint64 change_len;
 
+    arg_uint64(0, &new_heap_top);
+
+    if (new_heap_top == 0)
+    {
+        // 参数为 0 时只查询当前堆顶
+        ret_heap_top = p->heap_top;
+        printf("look event: ret_heap_top = %p\n", ret_heap_top);
+    }
+    else if (new_heap_top > p->heap_top)
+    {
+        change_len = new_heap_top - p->heap_top;
+        if (change_len > 0xfffffffful)
+            return (uint64)-1;
+
+        ret_heap_top = uvm_heap_grow(p->pgtbl,
+                                     p->heap_top,
+                                     (uint32)change_len);
+        if (ret_heap_top == (uint64)-1)
+            return (uint64)-1;
+
+        p->heap_top = ret_heap_top;
+        printf("grow event: ret_heap_top = %p\n", ret_heap_top);
+    }
+    else if (new_heap_top < p->heap_top)
+    {
+        change_len = p->heap_top - new_heap_top;
+        if (change_len > 0xfffffffful)
+            return (uint64)-1;
+
+        ret_heap_top = uvm_heap_ungrow(p->pgtbl,
+                                       p->heap_top,
+                                       (uint32)change_len);
+        if (ret_heap_top == (uint64)-1)
+            return (uint64)-1;
+
+        p->heap_top = ret_heap_top;
+        printf("ungrow event: ret_heap_top = %p\n", ret_heap_top);
+    }
+    else
+    {
+        ret_heap_top = p->heap_top;
+        printf("equal event: ret_heap_top = %p\n", ret_heap_top);
+    }
+
+    // 临时显示页表，用于观察堆页面的增加和释放
+    vm_print(p->pgtbl);
+    printf("\n");
+
+    return ret_heap_top;
+}
 /*
     增加一段内存映射
     uint64 start 起始地址

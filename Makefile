@@ -13,7 +13,8 @@ KERNEL_LD  = kernel.ld
 # 定义内核目标文件路径
 ELFKernel = $(TARGET)/kernel/kernel-qemu.elf
 NakedKernel = $(TARGET)/kernel/kernel-qemu.bin
-ELFUser = $(TARGET)/user/initcode.h
+#ELFUser = $(TARGET)/user/initcode.h
+ELFUser = $(UserPath)/initcode.h
 
 # 收集内核代码文件和用户代码文件(.c .S)
 KernelSourceFile = $(wildcard $(KernelPath)/*.c) $(wildcard $(KernelPath)/*.S)
@@ -78,7 +79,8 @@ $(ELFUser): $(UserOBJ)
 	$(LD) $(LDFLAGS) -N -e main -Ttext 0 -o $(TARGET)/user/initcode.out $(TARGET)/user/initcode.o
 	$(OBJCOPY) -S -O binary $(TARGET)/user/initcode.out $(TARGET)/user/initcode
 	xxd -i $(TARGET)/user/initcode > $(UserPath)/initcode.h
-
+# proc.o 会把生成的用户程序字节数组嵌入内核
+$(TARGET)/kernel/proc/proc.o: $(ELFUser)
 
 # 构建目标：创建输出目录、编译用户程序、编译内核
 build: $(TARGET) $(ELFUser) $(ELFKernel)
