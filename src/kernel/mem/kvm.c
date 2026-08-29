@@ -1,5 +1,5 @@
 #include "mod.h"
-
+#include "../trap/type.h"
 // 内核页表
 static pgtbl_t kernel_pgtbl;
 
