@@ -1,5 +1,7 @@
 #include "mod.h"
 #include "../trap/type.h"
+// trampoline 位于链接脚本保留的一页代码中
+extern char trampoline[];
 // 内核页表
 static pgtbl_t kernel_pgtbl;
 
@@ -149,6 +151,15 @@ void kvm_init()
     // 映射可分配物理页区域为可读可写
     vm_mappages(kernel_pgtbl, (uint64)ALLOC_BEGIN, (uint64)ALLOC_BEGIN,
                 (uint64)ALLOC_END - (uint64)ALLOC_BEGIN, PTE_R | PTE_W);
+    // 内核页表也要映射 trampoline，供用户态陷入和返回时继续执行。
+    vm_mappages(kernel_pgtbl, TRAMPOLINE, (uint64)trampoline,
+                PGSIZE, PTE_R | PTE_X);
+
+    // 为第一个用户进程预留一页内核栈，并映射到固定内核虚拟地址。
+    void *kstack_page = pmem_alloc(true);
+    assert(kstack_page != NULL, "kvm_init: alloc kernel stack failed");
+    vm_mappages(kernel_pgtbl, KSTACK(0), (uint64)kstack_page,
+                PGSIZE, PTE_R | PTE_W);
 }
 
 // 每个CPU都需要调用, 从不使用页表切换到使用内核页表

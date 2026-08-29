@@ -2,6 +2,7 @@
 #include "lib/mod.h"
 #include "mem/mod.h"
 #include "trap/mod.h"
+#include "proc/mod.h"
 
 // CPU 0 完成共享初始化后，将started设为1通知其他CPU
 volatile static int started = 0;
@@ -39,6 +40,10 @@ int main()
 
     // 每个hart都设置自己的PLIC、stvec并打开S-mode全局中断
     trap_kernel_inithart();
+
+    // 只有 CPU0 创建并启动第一个用户进程
+    if (cpuid == 0)
+        proc_make_first();
 
     // CPU 0已经输出过启动信息，CPU 1在完成自身初始化后再输出
     if (cpuid != 0)
