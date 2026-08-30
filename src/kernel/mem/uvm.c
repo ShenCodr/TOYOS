@@ -520,7 +520,42 @@ uint64 uvm_ustack_grow(pgtbl_t pgtbl, uint64 old_ustack_npage,
 // 顶级页表的 level 为 3
 static void destroy_pgtbl(pgtbl_t pgtbl, uint32 level)
 {
-    // TODO: Task 5 实现递归页表销毁
+    pte_t pte;
+    uint64 pa;
+
+    assert(pgtbl != NULL, "destroy_pgtbl: pgtbl is NULL");
+    assert(level >= 1 && level <= 3,
+           "destroy_pgtbl: invalid level");
+
+    for (uint32 i = 0; i < PGSIZE / sizeof(pte_t); i++)
+    {
+        pte = pgtbl[i];
+
+        if (!(pte & PTE_V))
+            continue;
+
+        pa = PTE_TO_PA(pte);
+
+        if (level > 1)
+        {
+            // 上两级有效项必须指向下一级页表
+            assert(PTE_CHECK(pte),
+                   "destroy_pgtbl: intermediate pte is a leaf");
+            destroy_pgtbl((pgtbl_t)pa, level - 1);
+        }
+        else
+        {
+            // 最后一级有效项对应普通用户物理页
+            assert(!PTE_CHECK(pte),
+                   "destroy_pgtbl: invalid leaf pte");
+            pmem_free(pa, false);
+        }
+
+        pgtbl[i] = 0;
+    }
+
+    // 当前页表页来自内核物理页池
+    pmem_free((uint64)pgtbl, true);
 }
 
 // 页表销毁
@@ -563,6 +598,47 @@ static void copy_range(pgtbl_t old, pgtbl_t new, uint64 begin, uint64 end)
 void uvm_copy_pgtbl(pgtbl_t old, pgtbl_t new, uint64 heap_top,
                     uint64 ustack_npage, mmap_region_t *mmap)
 {
-    // Task 5 实现前，保留复制辅助函数引用
-    (void)&copy_range;
+    mmap_region_t *tmp_mmap = mmap;
+    uint64 len;
+    uint64 max_stack_npage =
+        (TRAPFRAME - MMAP_END) / PGSIZE;
+
+    assert(old != NULL && new != NULL,
+           "uvm_copy_pgtbl: pgtbl is NULL");
+    assert(heap_top >= USER_BASE + PGSIZE &&
+           heap_top <= MMAP_BEGIN,
+           "uvm_copy_pgtbl: invalid heap top");
+    assert(ustack_npage != 0 &&
+           ustack_npage <= max_stack_npage,
+           "uvm_copy_pgtbl: invalid stack pages");
+
+    // 复制 initcode 页面和连续的用户堆
+    copy_range(old, new, USER_BASE, heap_top);
+
+    // 复制 trapframe 下方已经分配的用户栈
+    copy_range(old, new,
+               TRAPFRAME - ustack_npage * PGSIZE,
+               TRAPFRAME);
+
+    // 复制 mmap 链表记录的所有已分配区域
+    while (tmp_mmap != NULL)
+    {
+        assert(tmp_mmap->npages != 0,
+               "uvm_copy_pgtbl: empty mmap region");
+        assert(tmp_mmap->begin % PGSIZE == 0,
+               "uvm_copy_pgtbl: unaligned mmap region");
+        assert(tmp_mmap->begin >= MMAP_BEGIN &&
+               tmp_mmap->begin < MMAP_END,
+               "uvm_copy_pgtbl: mmap begin out of range");
+
+        len = (uint64)tmp_mmap->npages * PGSIZE;
+        assert(len <= MMAP_END - tmp_mmap->begin,
+               "uvm_copy_pgtbl: mmap end out of range");
+
+        copy_range(old, new,
+                   tmp_mmap->begin,
+                   tmp_mmap->begin + len);
+
+        tmp_mmap = tmp_mmap->next;
+    }
 }
