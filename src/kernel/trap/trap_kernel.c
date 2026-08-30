@@ -81,6 +81,7 @@ void trap_kernel_handler()
     assert(intr_get() == 0, "trap_kernel_handler: interreput enabled");
 
     int trap_id = scause & 0xf;
+    bool should_yield = false;
 
     /* 高位bit标识了是中断还是异常 */
     if (scause & 0x8000000000000000ul) {
@@ -89,6 +90,12 @@ void trap_kernel_handler()
         {
         case 1://S-mode software interrupt
             timer_interrupt_handler();
+
+            proc_t *p = myproc();
+            if (p != NULL &&
+                p->state == RUNNING &&
+                mycpu()->noff == 0)
+                should_yield = true;
             break;
         case 9://S-mode external interrupt
             external_interrupt_handler();
@@ -110,6 +117,13 @@ void trap_kernel_handler()
             panic("trap_kernel_handler");
         }
     }
+
+    if (should_yield)
+        proc_yield();
+
+    // 调度期间其他 trap 可能改写 CSR，返回前恢复原内核现场。
+    w_sepc(sepc);
+    w_sstatus(sstatus);
 }
 
 // 外设中断处理 (基于PLIC，lab-3只需要识别和处理UART中断)

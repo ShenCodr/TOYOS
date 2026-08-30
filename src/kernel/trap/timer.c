@@ -54,6 +54,7 @@ void timer_update()
 {
     spinlock_acquire(&sys_timer.lk);
     sys_timer.ticks++;
+    proc_wakeup(&sys_timer);
     spinlock_release(&sys_timer.lk);
 }
 
@@ -64,4 +65,16 @@ uint64 timer_get_ticks()
     uint64 ticks = sys_timer.ticks;
     spinlock_release(&sys_timer.lk);
     return ticks;
+}
+
+// 让当前进程睡眠至少 ntick 个系统时钟周期
+void timer_wait(uint64 ntick)
+{
+    spinlock_acquire(&sys_timer.lk);
+    uint64 begin = sys_timer.ticks;
+
+    while (sys_timer.ticks - begin < ntick)
+        proc_sleep(&sys_timer, &sys_timer.lk);
+
+    spinlock_release(&sys_timer.lk);
 }

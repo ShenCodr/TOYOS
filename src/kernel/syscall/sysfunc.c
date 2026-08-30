@@ -279,3 +279,14 @@ uint64 sys_exit()
     panic("sys_exit: returned");
     return 0;
 }
+
+// 让当前进程睡眠指定数量的系统时钟周期
+uint64 sys_sleep()
+{
+    uint32 ntick;
+
+    arg_uint32(0, &ntick);
+    timer_wait(ntick);
+
+    return 0;
+}
