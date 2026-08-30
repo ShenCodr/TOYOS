@@ -258,3 +258,24 @@ uint64 sys_fork()
 {
     return proc_fork();
 }
+
+// 等待一个子进程退出，可选地传回退出状态
+uint64 sys_wait()
+{
+    uint64 user_addr;
+
+    arg_uint64(0, &user_addr);
+    return proc_wait(user_addr);
+}
+
+// 退出当前进程，退出码由父进程 wait 获取
+uint64 sys_exit()
+{
+    uint32 exit_code;
+
+    arg_uint32(0, &exit_code);
+    proc_exit((int)exit_code);
+
+    panic("sys_exit: returned");
+    return 0;
+}

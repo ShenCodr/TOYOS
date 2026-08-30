@@ -24,6 +24,9 @@ static proc_t proc_list[N_PROC];
 static int global_pid;
 static spinlock_t pid_lk;
 
+// 保护父子关系以及 wait/exit 的检查与唤醒顺序
+static spinlock_t wait_lk;
+
 // 分配一个全局唯一的 PID
 static int alloc_pid()
 {
@@ -50,6 +53,7 @@ static void proc_return()
 void proc_init()
 {
     spinlock_init(&pid_lk, "pid");
+    spinlock_init(&wait_lk, "wait");
     global_pid = 1;
 
     for (int i = 0; i < N_PROC; i++) {
@@ -246,6 +250,177 @@ int proc_fork()
     spinlock_release(&child->lk);
 
     return child_pid;
+}
+
+/*
+    将退出进程的子进程过继给 proczero。
+    调用者持有 wait_lk。
+*/
+static void proc_reparent(proc_t *parent)
+{
+    bool wake_proczero = false;
+
+    assert(spinlock_holding(&wait_lk),
+           "proc_reparent: wait lock not held");
+
+    for (int i = 0; i < N_PROC; i++) {
+        proc_t *child = &proc_list[i];
+
+        spinlock_acquire(&child->lk);
+        if (child->parent == parent) {
+            child->parent = proczero;
+            if (child->state == ZOMBIE)
+                wake_proczero = true;
+        }
+        spinlock_release(&child->lk);
+    }
+
+    if (wake_proczero) {
+        spinlock_acquire(&proczero->lk);
+        if (proczero->state == SLEEPING &&
+            proczero->sleep_space == proczero)
+            proczero->state = RUNNABLE;
+        spinlock_release(&proczero->lk);
+    }
+}
+
+/*
+    唤醒等待自身子进程退出的父进程。
+    调用者持有父进程锁。
+*/
+static void proc_try_wakeup(proc_t *p)
+{
+    assert(spinlock_holding(&p->lk),
+           "proc_try_wakeup: proc lock not held");
+
+    if (p->state == SLEEPING && p->sleep_space == p)
+        p->state = RUNNABLE;
+}
+
+/*
+    当前进程退出，保留为 ZOMBIE 等待父进程回收。
+*/
+void proc_exit(int exit_code)
+{
+    proc_t *p = myproc();
+
+    assert(p != NULL, "proc_exit: no current proc");
+    assert(p != proczero, "proc_exit: proczero cannot exit");
+
+    spinlock_acquire(&wait_lk);
+
+    proc_reparent(p);
+
+    proc_t *parent = p->parent;
+    assert(parent != NULL, "proc_exit: no parent");
+    spinlock_acquire(&parent->lk);
+    proc_try_wakeup(parent);
+    spinlock_release(&parent->lk);
+
+    spinlock_acquire(&p->lk);
+    p->exit_code = exit_code;
+    p->state = ZOMBIE;
+
+    spinlock_release(&wait_lk);
+    proc_sched();
+
+    panic("proc_exit: returned");
+}
+
+/*
+    等待并回收一个子进程。
+    成功返回子进程 PID，没有子进程时返回 -1。
+*/
+int proc_wait(uint64 user_addr)
+{
+    proc_t *parent = myproc();
+
+    assert(parent != NULL, "proc_wait: no current proc");
+
+    spinlock_acquire(&wait_lk);
+
+    while (1) {
+        bool have_child = false;
+
+        for (int i = 0; i < N_PROC; i++) {
+            proc_t *child = &proc_list[i];
+
+            spinlock_acquire(&child->lk);
+            if (child->parent == parent) {
+                have_child = true;
+
+                if (child->state == ZOMBIE) {
+                    int child_pid = child->pid;
+                    int exit_code = child->exit_code;
+
+                    if (user_addr != 0)
+                        uvm_copyout(parent->pgtbl,
+                                    user_addr,
+                                    (uint64)&exit_code,
+                                    sizeof(exit_code));
+
+                    proc_free(child);
+                    spinlock_release(&child->lk);
+                    spinlock_release(&wait_lk);
+                    return child_pid;
+                }
+            }
+            spinlock_release(&child->lk);
+        }
+
+        if (!have_child) {
+            spinlock_release(&wait_lk);
+            return -1;
+        }
+
+        proc_sleep(parent, &wait_lk);
+    }
+}
+
+/*
+    当前进程等待 sleep_space 对应的资源。
+    返回时重新持有调用者传入的锁。
+*/
+void proc_sleep(void *sleep_space, spinlock_t *lk)
+{
+    proc_t *p = myproc();
+
+    assert(p != NULL, "proc_sleep: no current proc");
+    assert(lk != NULL, "proc_sleep: no lock");
+    assert(spinlock_holding(lk), "proc_sleep: lock not held");
+
+    if (lk != &p->lk) {
+        spinlock_acquire(&p->lk);
+        spinlock_release(lk);
+    }
+
+    p->sleep_space = sleep_space;
+    p->state = SLEEPING;
+    proc_sched();
+    p->sleep_space = NULL;
+
+    if (lk != &p->lk) {
+        spinlock_release(&p->lk);
+        spinlock_acquire(lk);
+    }
+}
+
+// 唤醒所有等待 sleep_space 的进程
+void proc_wakeup(void *sleep_space)
+{
+    proc_t *current = myproc();
+
+    for (int i = 0; i < N_PROC; i++) {
+        proc_t *p = &proc_list[i];
+
+        if (p == current)
+            continue;
+
+        spinlock_acquire(&p->lk);
+        if (p->state == SLEEPING && p->sleep_space == sleep_space)
+            p->state = RUNNABLE;
+        spinlock_release(&p->lk);
+    }
 }
 
 /*

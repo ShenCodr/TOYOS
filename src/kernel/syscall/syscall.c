@@ -9,6 +9,8 @@ static uint64 (*syscalls[])(void) = {
     [SYS_print_int] sys_print_int,
     [SYS_getpid] sys_getpid,
     [SYS_fork] sys_fork,
+    [SYS_wait] sys_wait,
+    [SYS_exit] sys_exit,
 
     [SYS_copyin] sys_copyin,
     [SYS_copyout] sys_copyout,
