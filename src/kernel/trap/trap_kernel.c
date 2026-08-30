@@ -135,6 +135,10 @@ void external_interrupt_handler()
     {
         uart_intr();
     }
+    else if (irq == VIRTIO_IRQ)
+    {
+        virtio_disk_intr();
+    }
     else if (irq)
     {
         printf("unexpected external interrupt: irq = %d\n", irq);

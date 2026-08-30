@@ -1,69 +1,6 @@
 #include "mod.h"
 
 /*
-    测试: 从用户空间传入一个int类型的数组
-    uint64 addr 数组起始地址
-    uint32 len  元素数量
-    成功返回0
-*/
-uint64 sys_copyin()
-{
-    proc_t *p = myproc();
-    uint64 addr;
-    uint32 len;
-    int value;
-
-    arg_uint64(0, &addr);
-    arg_uint32(1, &len);
-
-    // 逐个读取用户数组元素，避免在内核栈上创建不受控的数组
-    for (uint32 i = 0; i < len; i++)
-    {
-        uvm_copyin(p->pgtbl,
-                   (uint64)&value,
-                   addr + i * sizeof(int),
-                   sizeof(int));
-        printf("get a number from user: %d\n", value);
-    }
-
-    return 0;
-}
-/*
-    测试: 向用户空间传出一个int类型的数组
-    uint64 addr 数组起始地址
-    成功返回拷贝的元素数量
-*/
-uint64 sys_copyout()
-{
-    proc_t *p = myproc();
-    uint64 addr;
-    int values[5] = {1, 2, 3, 4, 5};
-
-    arg_uint64(0, &addr);
-
-    uvm_copyout(p->pgtbl,
-                addr,
-                (uint64)values,
-                sizeof(values));
-
-    return 5;
-}
-/*
-    测试: 从用户空间传入一个字符串
-    uint64 addr 字符串起始地址
-    成功返回0
-*/
-uint64 sys_copyinstr()
-{
-    char buf[STR_MAXLEN];
-
-    arg_str(0, buf, STR_MAXLEN);
-    printf("get string for user: %s\n", buf);
-
-    return 0;
-}
-
-/*
     用户堆空间伸缩
     uint64 new_heap_top (如果是0, 代表查询当前堆顶位置)
     成功返回new_heap_top, 失败返回-1
@@ -288,5 +225,120 @@ uint64 sys_sleep()
     arg_uint32(0, &ntick);
     timer_wait(ntick);
 
+    return 0;
+}
+
+/* 从 data bitmap 申请一个块。 */
+uint64 sys_alloc_block()
+{
+    return bitmap_alloc_block();
+}
+
+/* 释放指定 data block。 */
+uint64 sys_free_block()
+{
+    uint32 block_num;
+
+    arg_uint32(0, &block_num);
+    bitmap_free_block(block_num);
+    return 0;
+}
+
+/* 从 inode bitmap 申请一个 inode。 */
+uint64 sys_alloc_inode()
+{
+    return bitmap_alloc_inode();
+}
+
+/* 释放指定 inode。 */
+uint64 sys_free_inode()
+{
+    uint32 inode_num;
+
+    arg_uint32(0, &inode_num);
+    bitmap_free_inode(inode_num);
+    return 0;
+}
+
+/* 用户接口约定：0=data bitmap，1=inode bitmap。 */
+uint64 sys_show_bitmap()
+{
+    uint32 choose_bitmap;
+
+    arg_uint32(0, &choose_bitmap);
+    if (choose_bitmap > 1)
+        return (uint64)-1;
+
+    bitmap_print(choose_bitmap == 0);
+    return 0;
+}
+
+/* 获取并保持指定块对应的 buffer 锁。 */
+uint64 sys_get_block()
+{
+    uint32 block_num;
+
+    arg_uint32(0, &block_num);
+    return (uint64)buffer_get(block_num);
+}
+
+/* 将 buffer 的完整块复制到用户空间。 */
+uint64 sys_read_block()
+{
+    proc_t *p = myproc();
+    uint64 addr_buf, addr_data;
+
+    arg_uint64(0, &addr_buf);
+    arg_uint64(1, &addr_data);
+    buffer_t *buf = (buffer_t *)addr_buf;
+
+    assert(buf != NULL, "sys_read_block: NULL buffer");
+    assert(sleeplock_holding(&buf->slk), "sys_read_block: buffer not locked");
+    uvm_copyout(p->pgtbl, addr_data, (uint64)buf->data, BLOCK_SIZE);
+    return 0;
+}
+
+/* 从用户空间复制完整块并写回磁盘。 */
+uint64 sys_write_block()
+{
+    proc_t *p = myproc();
+    uint64 addr_buf, addr_data;
+
+    arg_uint64(0, &addr_buf);
+    arg_uint64(1, &addr_data);
+    buffer_t *buf = (buffer_t *)addr_buf;
+
+    assert(buf != NULL, "sys_write_block: NULL buffer");
+    assert(sleeplock_holding(&buf->slk), "sys_write_block: buffer not locked");
+    uvm_copyin(p->pgtbl, (uint64)buf->data, addr_data, BLOCK_SIZE);
+    buffer_write(buf);
+    return 0;
+}
+
+/* 归还通过 sys_get_block 获得的 buffer。 */
+uint64 sys_put_block()
+{
+    uint64 addr_buf;
+
+    arg_uint64(0, &addr_buf);
+    buffer_t *buf = (buffer_t *)addr_buf;
+
+    assert(buf != NULL, "sys_put_block: NULL buffer");
+    buffer_put(buf);
+    return 0;
+}
+
+uint64 sys_show_buffer()
+{
+    buffer_print_info();
+    return 0;
+}
+
+uint64 sys_flush_buffer()
+{
+    uint32 buffer_count;
+
+    arg_uint32(0, &buffer_count);
+    buffer_freemem(buffer_count);
     return 0;
 }

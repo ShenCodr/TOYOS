@@ -3,6 +3,7 @@
 #include "mem/mod.h"
 #include "trap/mod.h"
 #include "proc/mod.h"
+#include "fs/mod.h"
 
 // CPU 0 完成共享初始化后，将started设为1通知其他CPU
 volatile static int started = 0;
@@ -21,6 +22,7 @@ int main()
         kvm_inithart();
 
         mmap_init();
+        virtio_disk_init();
         proc_init();
         proc_make_first();
 

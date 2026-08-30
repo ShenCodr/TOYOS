@@ -9,6 +9,14 @@
 #define SYS_exit 9
 #define SYS_sleep 10
 
-#define SYS_copyin 11
-#define SYS_copyout 12
-#define SYS_copyinstr 13
+#define SYS_alloc_block 11
+#define SYS_free_block 12
+#define SYS_alloc_inode 13
+#define SYS_free_inode 14
+#define SYS_show_bitmap 15
+#define SYS_get_block 16
+#define SYS_read_block 17
+#define SYS_write_block 18
+#define SYS_put_block 19
+#define SYS_show_buffer 20
+#define SYS_flush_buffer 21

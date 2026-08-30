@@ -1,5 +1,6 @@
 #include "mod.h"
 #include "../trap/type.h"
+#include "../fs/type.h"
 // trampoline 位于链接脚本保留的一页代码中
 extern char trampoline[];
 // 内核页表
@@ -11,6 +12,11 @@ static pgtbl_t kernel_pgtbl;
 // 提示：使用 VA_TO_VPN + PTE_TO_PA + PA_TO_PTE
 pte_t *vm_getpte(pgtbl_t pgtbl, uint64 va, bool alloc)
 {
+    if (pgtbl == NULL) {
+        pgtbl = kernel_pgtbl;
+    }
+    assert(pgtbl != NULL, "vm_getpte: kernel page table not initialized");
+
     // Sv39 有三级页表,其中level 0 的 PTE 是最终要返回的映射项。
     for (int level = 2; level > 0; level--)
     {
@@ -133,6 +139,9 @@ void kvm_init()
 
     // 映射 UART 寄存器所在的一页
     vm_mappages(kernel_pgtbl, UART_BASE, UART_BASE, PGSIZE, PTE_R | PTE_W);
+    // 映射 VirtIO 块设备的 MMIO 寄存器
+    vm_mappages(kernel_pgtbl, VIRTIO_BASE, VIRTIO_BASE,
+                PGSIZE, PTE_R | PTE_W);
 
     // 映射 CLINT 寄存器区域
     vm_mappages(kernel_pgtbl, CLINT_BASE, CLINT_BASE, 0x10000, PTE_R | PTE_W);

@@ -46,6 +46,9 @@ static void proc_return()
     proc_t *p = myproc();
 
     spinlock_release(&p->lk);
+    if (p == proczero)
+        fs_init();
+
     trap_user_return();
 }
 

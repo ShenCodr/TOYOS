@@ -8,6 +8,7 @@ TARGET = target
 # 定义各模块路径
 KernelPath = src/kernel
 UserPath = src/user
+MKFSPath = src/mkfs
 # 内核链接脚本
 KERNEL_LD  = kernel.ld
 # 定义内核目标文件路径
@@ -15,6 +16,7 @@ ELFKernel = $(TARGET)/kernel/kernel-qemu.elf
 NakedKernel = $(TARGET)/kernel/kernel-qemu.bin
 #ELFUser = $(TARGET)/user/initcode.h
 ELFUser = $(UserPath)/initcode.h
+DISKIMG = $(TARGET)/mkfs/disk.img
 
 # 收集内核代码文件和用户代码文件(.c .S)
 KernelSourceFile = $(wildcard $(KernelPath)/*.c) $(wildcard $(KernelPath)/*.S)
@@ -30,6 +32,8 @@ UserOBJ = $(patsubst $(UserPath)/%.c, $(TARGET)/user/%.o, $(filter %.c, $(UserSo
 QEMU     = qemu-system-riscv64  # 指定QEMU程序
 QEMUOPTS = -machine virt -bios none -kernel $(TARGET)/kernel/kernel-qemu.elf  # 基础启动参数
 QEMUOPTS += -m 128M -smp $(CPUNUM) -nographic  # 内存、CPU数量及无图形界面配置
+QEMUOPTS += -drive file=$(DISKIMG),if=none,format=raw,id=x0 # 初始磁盘映像
+QEMUOPTS += -device virtio-blk-device,drive=x0,bus=virtio-mmio-bus.0 # 虚拟磁盘设备
 
 # 调试相关配置
 GDBPORT = $(shell expr `id -u` % 5000 + 25000)  # 动态计算GDB端口号
@@ -54,7 +58,9 @@ ifeq ($(wildcard $(TARGET)),)
 	@mkdir -p $(TARGET)/kernel/mem
 	@mkdir -p $(TARGET)/kernel/trap
 	@mkdir -p $(TARGET)/kernel/proc
+	@mkdir -p $(TARGET)/kernel/fs
 	@mkdir -p $(TARGET)/kernel/syscall
+	@mkdir -p $(TARGET)/mkfs
 	@mkdir -p $(TARGET)/user
 endif
 
@@ -82,8 +88,14 @@ $(ELFUser): $(UserOBJ)
 # proc.o 会把生成的用户程序字节数组嵌入内核
 $(TARGET)/kernel/proc/proc.o: $(ELFUser)
 
+# 生成磁盘映像
+$(DISKIMG):
+	gcc -Werror -Wall -I. -o $(TARGET)/mkfs/mkfs $(MKFSPath)/mkfs.c
+	$(TARGET)/mkfs/mkfs $(DISKIMG)
+
+# build 追加 disk.img 依赖，保留原有 build 配方
 # 构建目标：创建输出目录、编译用户程序、编译内核
-build: $(TARGET) $(ELFUser) $(ELFKernel)
+build: $(TARGET) $(ELFUser) $(ELFKernel) $(DISKIMG)
 	@echo "===== make success! ====="
 
 # 运行目标：先构建再启动QEMU
