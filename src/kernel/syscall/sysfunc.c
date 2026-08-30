@@ -224,3 +224,37 @@ uint64 sys_munmap()
 
     return 0;
 }
+// 打印用户态字符串
+uint64 sys_print_str()
+{
+    char str[STR_MAXLEN];
+
+    arg_str(0, str, STR_MAXLEN);
+    printf("%s", str);
+
+    return 0;
+}
+
+// 打印一个 32 位整数
+uint64 sys_print_int()
+{
+    uint32 num;
+
+    arg_uint32(0, &num);
+    printf("%d\n", (int)num);
+
+    return 0;
+}
+
+// 获取当前进程 PID
+uint64 sys_getpid()
+{
+    proc_t *p = myproc();
+    return p->pid;
+}
+
+// 复制当前进程，父进程获得子进程 PID。
+uint64 sys_fork()
+{
+    return proc_fork();
+}

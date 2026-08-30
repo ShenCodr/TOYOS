@@ -155,11 +155,14 @@ void kvm_init()
     vm_mappages(kernel_pgtbl, TRAMPOLINE, (uint64)trampoline,
                 PGSIZE, PTE_R | PTE_X);
 
-    // 为第一个用户进程预留一页内核栈，并映射到固定内核虚拟地址。
-    void *kstack_page = pmem_alloc(true);
-    assert(kstack_page != NULL, "kvm_init: alloc kernel stack failed");
-    vm_mappages(kernel_pgtbl, KSTACK(0), (uint64)kstack_page,
-                PGSIZE, PTE_R | PTE_W);
+    // 为每个进程槽分配独立内核栈，相邻栈之间保留未映射保护页。
+    for (int i = 0; i < N_PROC; i++) {
+        void *kstack_page = pmem_alloc(true);
+        assert(kstack_page != NULL, "kvm_init: alloc kernel stack failed");
+
+        vm_mappages(kernel_pgtbl, KSTACK(i), (uint64)kstack_page,
+                    PGSIZE, PTE_R | PTE_W);
+    }
 }
 
 // 每个CPU都需要调用, 从不使用页表切换到使用内核页表

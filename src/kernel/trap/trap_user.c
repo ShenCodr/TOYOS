@@ -32,6 +32,7 @@ void trap_user_handler()
     proc->tf->user_to_kern_epc = sepc;
 
     int trap_id = scause & 0xf;
+    bool should_yield = false;
     if (scause & 0x8000000000000000ul)
     {
         // 中断：复用 Lab-3 已验证的时钟和 UART 外设处理路径
@@ -39,6 +40,7 @@ void trap_user_handler()
         {
         case 1:
             timer_interrupt_handler();
+            should_yield = true;
             break;
 
         case 9:
@@ -64,7 +66,7 @@ void trap_user_handler()
             // 根据 a7 中的系统调用号分发，并把返回值写回 a0
             syscall();
             break;
-                case 13:
+        case 13:
         case 15:
         {
             uint64 old_npage = proc->ustack_npage;
@@ -93,6 +95,9 @@ void trap_user_handler()
             panic("trap_user_handler");
         }
     }
+
+    if (should_yield)
+        proc_yield();
 
     // 恢复用户页表和用户寄存器，最终由 sret 回到用户态
     trap_user_return();

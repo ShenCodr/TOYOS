@@ -11,46 +11,39 @@ int main()
 {
     int cpuid = r_tp();
 
-    if (cpuid == 0)
-    {
-        // 只由CPU 0完成一次的内核共享初始化
+    if (cpuid == 0) {
+        // CPU 0 完成共享资源和首进程初始化
         print_init();
-        pmem_init();
-        kvm_init();
-        trap_kernel_init();
-        mmap_init(); // 初始化全局 mmap_region 节点仓库
-
         printf("cpu %d is booting!\n", cpuid);
 
-        // 先保证上述初始化对其他CPU可见，再发布started
+        pmem_init();
+        kvm_init();
+        kvm_inithart();
+
+        mmap_init();
+        proc_init();
+        proc_make_first();
+
+        trap_kernel_init();
+        trap_kernel_inithart();
+
+        // 首进程准备完成后再唤醒其他 CPU
         __sync_synchronize();
         started = 1;
-    }
-    else
-    {
-        // CPU 1等待CPU 0完成共享资源初始化
+    } else {
         while (started == 0)
             ;
 
-        // 读取started后重新同步，确保看到CPU 0初始化后的内存状态
         __sync_synchronize();
-    }
-
-    // 每个hart都需要切换到内核页表
-    kvm_inithart();
-
-    // 每个hart都设置自己的PLIC、stvec并打开S-mode全局中断
-    trap_kernel_inithart();
-
-    // 只有 CPU0 创建并启动第一个用户进程
-    if (cpuid == 0)
-        proc_make_first();
-
-    // CPU 0已经输出过启动信息，CPU 1在完成自身初始化后再输出
-    if (cpuid != 0)
         printf("cpu %d is booting!\n", cpuid);
 
-    // 当前没有调度器和进程，内核保持运行以等待中断
-    while (1)
-        ;
+        kvm_inithart();
+        trap_kernel_inithart();
+    }
+
+    // 每个 CPU 都进入自己的调度循环
+    proc_scheduler();
+
+    panic("main: never back");
+    return 0;
 }
