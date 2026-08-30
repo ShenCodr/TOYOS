@@ -133,7 +133,61 @@ uint64 sys_brk()
 */
 uint64 sys_mmap()
 {
-    return 0;
+    proc_t *p = myproc();
+    mmap_region_t *tmp;
+    uint64 start;
+    uint64 mapped_begin;
+    uint32 len;
+
+    arg_uint64(0, &start);
+    arg_uint32(1, &len);
+
+    if (len == 0 || len % PGSIZE != 0)
+        return (uint64)-1;
+
+    if (start != 0)
+    {
+        if (start % PGSIZE != 0)
+            return (uint64)-1;
+        if (start < MMAP_BEGIN || start >= MMAP_END)
+            return (uint64)-1;
+        if ((uint64)len > MMAP_END - start)
+            return (uint64)-1;
+
+        mapped_begin = start;
+    }
+    else
+    {
+        // 与 uvm_mmap_find 保持相同的 first-fit 规则
+        mapped_begin = MMAP_BEGIN;
+        tmp = p->mmap;
+
+        while (tmp != NULL)
+        {
+            if (mapped_begin <= tmp->begin &&
+                (uint64)len <= tmp->begin - mapped_begin)
+                break;
+
+            mapped_begin = tmp->begin +
+                           (uint64)tmp->npages * PGSIZE;
+            tmp = tmp->next;
+        }
+
+        if (mapped_begin > MMAP_END ||
+            (uint64)len > MMAP_END - mapped_begin)
+            return (uint64)-1;
+    }
+
+    uvm_mmap(start,
+             len / PGSIZE,
+             PTE_R | PTE_W | PTE_U);
+
+    // Task 4 提示性输出
+    uvm_show_mmaplist(p->mmap);
+    vm_print(p->pgtbl);
+    printf("\n");
+
+    return mapped_begin;
 }
 
 /*
@@ -144,5 +198,29 @@ uint64 sys_mmap()
 */
 uint64 sys_munmap()
 {
+    proc_t *p = myproc();
+    uint64 start;
+    uint32 len;
+
+    arg_uint64(0, &start);
+    arg_uint32(1, &len);
+
+    if (len == 0 || len % PGSIZE != 0)
+        return (uint64)-1;
+
+    if (start % PGSIZE != 0)
+        return (uint64)-1;
+    if (start < MMAP_BEGIN || start >= MMAP_END)
+        return (uint64)-1;
+    if ((uint64)len > MMAP_END - start)
+        return (uint64)-1;
+
+    uvm_munmap(start, len / PGSIZE);
+
+    // Task 4 提示性输出
+    uvm_show_mmaplist(p->mmap);
+    vm_print(p->pgtbl);
+    printf("\n");
+
     return 0;
 }

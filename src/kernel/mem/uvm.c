@@ -169,10 +169,47 @@ static void mmap_merge(mmap_region_t *mmap_1, mmap_region_t *mmap_2, bool keep_m
 // 寻找一块足够大的区域(len), 作为 mmap_region
 // 由uvm_mmap调用(处理begin==0的情况)
 // 成功返回begin, 失败返回0
-static uint64 uvm_mmap_find(mmap_region_t *head_mmap, uint64 len, mmap_region_t **p_last_mmap, mmap_region_t **p_tmp_mmap)
+static uint64 uvm_mmap_find(mmap_region_t *head_mmap, uint64 len,
+                            mmap_region_t **p_last_mmap,
+                            mmap_region_t **p_tmp_mmap)
 {
-    //TODO
-    return 0;
+    uint64 begin = MMAP_BEGIN;
+    uint64 end;
+    mmap_region_t *last_mmap = NULL;
+    mmap_region_t *tmp_mmap = head_mmap;
+
+    assert(len != 0 && len % PGSIZE == 0,
+           "uvm_mmap_find: illegal len");
+    assert(p_last_mmap != NULL && p_tmp_mmap != NULL,
+           "uvm_mmap_find: NULL output");
+
+    // 在相邻已分配区域之间寻找第一个足够大的空隙
+    while (tmp_mmap != NULL)
+    {
+        assert(tmp_mmap->begin >= begin,
+               "uvm_mmap_find: invalid mmap list");
+
+        if (len <= tmp_mmap->begin - begin)
+            break;
+
+        end = tmp_mmap->begin +
+              (uint64)tmp_mmap->npages * PGSIZE;
+        assert(end >= tmp_mmap->begin && end <= MMAP_END,
+               "uvm_mmap_find: invalid mmap region");
+
+        begin = end;
+        last_mmap = tmp_mmap;
+        tmp_mmap = tmp_mmap->next;
+    }
+
+    *p_last_mmap = last_mmap;
+    *p_tmp_mmap = tmp_mmap;
+
+    // 检查链表末尾或当前空隙是否仍位于 mmap 地址范围内
+    if (begin > MMAP_END || len > MMAP_END - begin)
+        return 0;
+
+    return begin;
 }
 
 // 在用户页表和进程mmap链里新增mmap区域 [begin, begin + npages * PGSIZE)
@@ -181,16 +218,184 @@ static uint64 uvm_mmap_find(mmap_region_t *head_mmap, uint64 len, mmap_region_t 
 // 失败则panic卡死
 void uvm_mmap(uint64 begin, uint32 npages, int perm)
 {
-    // Task 4 实现前，仅保留辅助函数引用以通过分阶段编译
-    (void)&mmap_merge;
-    (void)&uvm_mmap_find;
+    proc_t *p = myproc();
+    mmap_region_t *last_mmap = NULL;
+    mmap_region_t *tmp_mmap;
+    mmap_region_t *new_mmap;
+    uint64 len;
+    uint64 end;
+    uint64 last_end;
+    uint64 page;
+
+    assert(p != NULL, "uvm_mmap: no current process");
+    tmp_mmap = p->mmap;
+    assert(npages != 0, "uvm_mmap: zero pages");
+
+    len = (uint64)npages * PGSIZE;
+
+    if (begin == 0)
+    {
+        // 用户未指定地址时，在 mmap 区域内进行 first-fit 查找
+        begin = uvm_mmap_find(p->mmap, len,
+                              &last_mmap, &tmp_mmap);
+        assert(begin != 0, "uvm_mmap: no enough space");
+    }
+    else
+    {
+        assert(begin % PGSIZE == 0,
+               "uvm_mmap: begin is not page-aligned");
+        assert(begin >= MMAP_BEGIN && begin < MMAP_END,
+               "uvm_mmap: begin out of range");
+        assert(len <= MMAP_END - begin,
+               "uvm_mmap: end out of range");
+
+        // 找到指定地址左右两侧的已分配区域
+        while (tmp_mmap != NULL && tmp_mmap->begin < begin)
+        {
+            last_mmap = tmp_mmap;
+            tmp_mmap = tmp_mmap->next;
+        }
+    }
+
+    end = begin + len;
+
+    // 新区域不能与左右已有区域重叠
+    if (last_mmap != NULL)
+    {
+        last_end = last_mmap->begin +
+                   (uint64)last_mmap->npages * PGSIZE;
+        assert(last_end <= begin,
+               "uvm_mmap: overlap with previous region");
+    }
+    if (tmp_mmap != NULL)
+    {
+        assert(end <= tmp_mmap->begin,
+               "uvm_mmap: overlap with next region");
+    }
+
+    // 将新区域插入按地址升序排列的进程 mmap 链表
+    new_mmap = mmap_region_alloc();
+    new_mmap->begin = begin;
+    new_mmap->npages = npages;
+    new_mmap->next = tmp_mmap;
+
+    if (last_mmap == NULL)
+        p->mmap = new_mmap;
+    else
+        last_mmap->next = new_mmap;
+
+    // 与左侧紧邻时保留左侧节点
+    if (last_mmap != NULL &&
+        last_mmap->begin +
+            (uint64)last_mmap->npages * PGSIZE == begin)
+    {
+        last_mmap->next = tmp_mmap;
+        mmap_merge(last_mmap, new_mmap, true);
+        new_mmap = last_mmap;
+    }
+
+    // 与右侧紧邻时保留当前节点
+    if (tmp_mmap != NULL &&
+        new_mmap->begin +
+            (uint64)new_mmap->npages * PGSIZE == tmp_mmap->begin)
+    {
+        new_mmap->next = tmp_mmap->next;
+        mmap_merge(new_mmap, tmp_mmap, true);
+    }
+    // 为每个用户虚拟页分配物理页并建立映射
+    for (uint64 va = begin; va < end; va += PGSIZE)
+    {
+        page = (uint64)pmem_alloc(false);
+        vm_mappages(p->pgtbl, va, page, PGSIZE, perm);
+    }
 }
 
 // 在用户页表和进程mmap链里释放mmap区域 [begin, begin + npages * PGSIZE)
 // 失败则panic卡死
 void uvm_munmap(uint64 begin, uint32 npages)
 {
+    proc_t *p = myproc();
+    mmap_region_t *last_mmap = NULL;
+    mmap_region_t *tmp_mmap;
+    mmap_region_t *right_mmap;
+    uint64 len;
+    uint64 end;
+    uint64 tmp_end;
 
+    assert(p != NULL, "uvm_munmap: no current process");
+    tmp_mmap = p->mmap;
+    assert(npages != 0, "uvm_munmap: zero pages");
+    assert(begin % PGSIZE == 0,
+           "uvm_munmap: begin is not page-aligned");
+    assert(begin >= MMAP_BEGIN && begin < MMAP_END,
+           "uvm_munmap: begin out of range");
+
+    len = (uint64)npages * PGSIZE;
+    assert(len <= MMAP_END - begin,
+           "uvm_munmap: end out of range");
+
+    end = begin + len;
+
+    // 找到完整包含待释放区间的节点
+    while (tmp_mmap != NULL && tmp_mmap->begin < begin)
+    {
+        tmp_end = tmp_mmap->begin +
+                  (uint64)tmp_mmap->npages * PGSIZE;
+
+        if (begin < tmp_end)
+            break;
+
+        last_mmap = tmp_mmap;
+        tmp_mmap = tmp_mmap->next;
+    }
+
+    assert(tmp_mmap != NULL,
+           "uvm_munmap: region not found");
+
+    tmp_end = tmp_mmap->begin +
+              (uint64)tmp_mmap->npages * PGSIZE;
+
+    assert(tmp_end >= tmp_mmap->begin && tmp_end <= MMAP_END,
+           "uvm_munmap: invalid mmap region");
+    assert(tmp_mmap->begin <= begin && end <= tmp_end,
+           "uvm_munmap: range is not fully mapped");
+
+    if (begin == tmp_mmap->begin && end == tmp_end)
+    {
+        // 释放整个节点
+        if (last_mmap == NULL)
+            p->mmap = tmp_mmap->next;
+        else
+            last_mmap->next = tmp_mmap->next;
+
+        mmap_region_free(tmp_mmap);
+    }
+    else if (begin == tmp_mmap->begin)
+    {
+        // 释放节点前部
+        tmp_mmap->begin = end;
+        tmp_mmap->npages -= npages;
+    }
+    else if (end == tmp_end)
+    {
+        // 释放节点后部
+        tmp_mmap->npages -= npages;
+    }
+    else
+    {
+        // 释放节点中间，创建节点记录右半部分
+        right_mmap = mmap_region_alloc();
+        right_mmap->begin = end;
+        right_mmap->npages =
+            (uint32)((tmp_end - end) / PGSIZE);
+        right_mmap->next = tmp_mmap->next;
+
+        tmp_mmap->npages =
+            (uint32)((begin - tmp_mmap->begin) / PGSIZE);
+        tmp_mmap->next = right_mmap;
+    }
+
+    vm_unmappages(p->pgtbl, begin, len, true);
 }
 
 /*------------------part-3: 用户空间heap和stack管理相关------------------*/
