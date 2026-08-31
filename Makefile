@@ -89,7 +89,7 @@ $(ELFUser): $(UserOBJ)
 $(TARGET)/kernel/proc/proc.o: $(ELFUser)
 
 # 生成磁盘映像
-$(DISKIMG):
+$(DISKIMG): $(MKFSPath)/mkfs.c $(MKFSPath)/mkfs.h
 	gcc -Werror -Wall -I. -o $(TARGET)/mkfs/mkfs $(MKFSPath)/mkfs.c
 	$(TARGET)/mkfs/mkfs $(DISKIMG)
 

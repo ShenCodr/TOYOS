@@ -1,118 +1,39 @@
-## Lab-7：文件系统之磁盘管理
+## Lab-8：文件系统之上层抽象
 
-### 1. 实验目标
+### 1. 实验目标与实现
 
-Lab-7 在 Lab-6 已具备调度、睡眠唤醒和睡眠锁的基础上，引入 QEMU VirtIO 块设备，建立文件系统最底层的磁盘管理能力。实验以 block 为基本单位完成磁盘镜像初始化、异步块读写、内存 buffer cache、superblock 读取和 inode/data bitmap 管理
+Lab-8 在 Lab-7 的 VirtIO、buffer cache、superblock 和 bitmap 之上，补齐 inode、目录项（dentry）和绝对路径解析，使磁盘块能够组织成普通文件与多层目录。实现包含 64 项 inode cache、inode 磁盘元数据同步、10 个直接索引、2 个一级间接索引和 1 个二级间接索引；目录项固定为 64B，支持名称查找、创建、删除以及 `.`、`..` 根目录初始化
 
-本实验完成以下功能：
+inode 数据读写按逻辑块分段，经 buffer cache 访问磁盘；新建索引块先清零再写盘，删除 inode 时递归释放数据块和各级索引块。普通文件拒绝产生空洞的 `offset > size` 写入，并用无溢出方式检查 `INODE_MAX_SIZE`。路径解析从 inode 0 开始，支持连续 `/`；失败路径会释放已经取得的 inode 引用
 
-1. 使用 Linux 侧 `mkfs` 生成并格式化 `disk.img`，写入文件系统 superblock。
-2. 在内核页表、PLIC 和外设中断路径中接入 VirtIO 块设备。
-3. 使用 active/inactive 双向循环链表实现带引用计数的 buffer cache。
-4. 在 `proczero` 的进程上下文中完成 buffer 初始化与 superblock 读取。
-5. 实现 data block 和 inode 的 bitmap 申请、释放与显示。
-6. 增加 11 个 Lab-7 系统调用，并完成三组官方测试。
-7. 回归验证 Lab-6 的 `fork`、`sleep`、`exit` 和 `wait`。
+复查阶段额外确认：新分配的数据块会清零，索引块分配失败不会把无效块号留在 inode 中，目录项创建会拒绝超出 superblock 范围的 inode 号；删除后重新分配同一数据块的隔离测试已读回零填充
 
-### 2. 磁盘镜像、VirtIO 与中断路径
+mkfs 已预置根目录 inode 0、`ABCD.txt` inode 1 和 `abcd.txt` inode 2，并保留 64 位 `off_t` 块偏移计算，确保 5GB 镜像可以从干净构建中正确生成。Makefile 同时依赖 `mkfs.c` 与 `mkfs.h`，源码改变后会重新制盘。
 
-`mkfs` 使用 `open + lseek + write + close` 创建 `disk.img`。镜像布局如下：
+### 2. 验证环境与结果
 
-```text
-[ superblock | inode bitmap | inode region | data bitmap | data region ]
-```
+测试使用双 hart、QEMU 5.1.0、4096B block 和 `N_BUFFER = N_BUFFER_TEST = 8`。每组测试都先精确重建 `target/mkfs/disk.img`，避免持久化目录项互相污染。教师 Test-2 的大文件读取对象在测试前已释放，实际验证时改为仍持有的大文件 inode `ip_2`；大文件源缓冲区使用静态数组，避免环境中物理页不保证连续导致的无关失败。
 
-block 大小为 4096 Byte。实际运行时，superblock 位于 block 0；inode bitmap 为 block 1--2；inode region 为 block 3--1026；data bitmap 为 block 1027--1066；data region 为 block 1067--1311786，总 inode 数为 65536。生成的镜像大小为 5,373,079,552 Byte。
+| 测试 | 验证内容 | 实际 QEMU 结果 |
+| --- | --- | --- |
+| Test 1 | inode cache、创建、引用计数与最后释放 | 根 inode 为 0、DIR、size 256；创建 inode 3/4 后 bitmap 为 `0 1 2 3 4`，释放后恢复为 `0 1 2`，无 panic。 |
+| Test 2 | 小文件、一级和二级索引、大文件读回 | 小文件 size 16000、直接块 1074--1077；大文件 size 174940000，直接块 1074--1083、一级索引 1084/2109、二级索引 3134，末尾读回 `GHABCDEF`。 |
+| Test 3 | 目录项查找、创建、删除与空槽复用 | 根目录初始项位于 0/64/128/192，新目录写入偏移 256，删除后恢复四个初始项，并正确读回预置文件内容。 |
+| Test 4 | 多层绝对路径与父目录解析 | `name=file.txt`；目标 inode 5、父目录 inode 4，文件 size 22、数据块 1076，读回 `This is file context!`。 |
 
-`mkfs` 中的块偏移使用 64 位 `off_t` 计算，并以创建、截断方式打开镜像，保证超过 4 GiB 的磁盘镜像可以从干净构建中正确生成。
-
-QEMU 通过 `-drive` 和 `virtio-blk-device` 挂载镜像。内核在 `kvm_init()` 中映射 `VIRTIO_BASE` MMIO 页面，在 PLIC 中设置并使能 `VIRTIO_IRQ`，并在外设中断处理中调用 `virtio_disk_intr()`。`virtio_disk_rw()` 提交 I/O 后，当前进程通过 Lab-6 的 `proc_sleep()` 等待；磁盘中断到达后由 `proc_wakeup()` 唤醒。
-
-```text
-mkfs -> disk.img -> VirtIO block device
-     -> VirtIO MMIO / PLIC IRQ 1
-     -> virtio_disk_rw / virtio_disk_intr
-     -> buffer cache -> superblock / bitmap -> system calls
-```
-
-### 3. Buffer cache 与磁盘读写
-
-每个 `buffer_t` 记录对应的磁盘 `block_num`、数据页 `data`、引用计数 `ref`、睡眠锁 `slk` 和 VirtIO 使用的 `disk` 标记。全局自旋锁保护链表、块号和引用计数；每个 buffer 的睡眠锁保护块数据和耗时的磁盘 I/O。
-
-buffer cache 由 active 和 inactive 两个带头节点的双向循环链表组成。active 链表中的 buffer 正被引用，inactive 链表中的 buffer 可以被复用或释放物理页。`buffer_get()` 先查 active，再查 inactive；若均未命中，则从 inactive 链表末端复用最久未使用的节点。`buffer_put()` 在引用归零时将节点放回 inactive 链表头部。`buffer_freemem()` 仅回收 inactive buffer 的数据页，因此不会破坏仍被使用的块。
-
-Test-3 的实际输出展示了 buffer 在 active/inactive 链表间的移动、引用计数变化及 `flush` 后的数据页回收。
-
-### 4. Superblock 与 bitmap 管理
-
-`fs_init()` 不能在内核启动阶段直接运行，因为读取磁盘时可能睡眠。系统因此在 `proczero` 第一次进入 `proc_return()`、且已经释放进程锁后执行 `fs_init()`：初始化 buffer cache，读取 block 0，复制全局 superblock，释放 buffer，并检查魔数、块大小和区域边界。
-
-bitmap 以 bit 为单位记录资源是否已分配。`bitmap_alloc_block()` 和 `bitmap_alloc_inode()` 从前向后扫描每个 bitmap block，设置首个空闲 bit 并写回磁盘；`bitmap_free_block()` 与 `bitmap_free_inode()` 清除相应 bit。data block 使用全局磁盘块号，inode 使用从 0 开始的 inode 编号，二者在计算 bitmap 位置时分别处理。
-
-### 5. 新增系统调用
-
-Lab-6 的 1--10 号正式系统调用保持不变。Lab-5 的临时数据传输测试接口已退出公开 ABI；Lab-7 使用 11--21 号接口：
-
-| 编号 | 系统调用           | 功能                             |
-| ---- | ------------------ | -------------------------------- |
-| 11   | `SYS_alloc_block`  | 从 data bitmap 申请一个 block    |
-| 12   | `SYS_free_block`   | 向 data bitmap 释放一个 block    |
-| 13   | `SYS_alloc_inode`  | 从 inode bitmap 申请一个 inode   |
-| 14   | `SYS_free_inode`   | 向 inode bitmap 释放一个 inode   |
-| 15   | `SYS_show_bitmap`  | 显示 data 或 inode bitmap        |
-| 16   | `SYS_get_block`    | 获取并锁定指定 block 的 buffer   |
-| 17   | `SYS_read_block`   | 将 buffer 的完整块复制到用户空间 |
-| 18   | `SYS_write_block`  | 从用户空间复制完整块并写入磁盘   |
-| 19   | `SYS_put_block`    | 归还并解锁 buffer                |
-| 20   | `SYS_show_buffer`  | 输出 active/inactive 链表状态    |
-| 21   | `SYS_flush_buffer` | 回收 inactive buffer 的物理页    |
-
-其中 `SYS_show_bitmap(0)` 对应 data bitmap，`SYS_show_bitmap(1)` 对应 inode bitmap；`SYS_read_block` 和 `SYS_write_block` 分别使用 Lab-5 已实现的 `uvm_copyout` 和 `uvm_copyin` 完成用户态与内核态之间的完整 block 传输。
-
-### 6. 实验联系
-
-| 实验  | 主要能力                        | 为 Lab-7 提供的基础                                    |
-| ----- | ------------------------------- | ------------------------------------------------------ |
-| Lab-2 | 物理页、Sv39 页表和内核虚拟地址 | 映射 VirtIO MMIO，申请 buffer 数据页，并进行地址翻译。 |
-| Lab-3 | trap、PLIC 和外设中断           | 响应 VirtIO 磁盘完成中断。                             |
-| Lab-4 | 用户态入口和系统调用            | 将 bitmap 与 buffer 测试能力暴露给用户程序。           |
-| Lab-5 | 用户地址空间复制                | 通过 `uvm_copyin/copyout` 传输完整 block 数据。        |
-| Lab-6 | 调度、睡眠唤醒和睡眠锁          | 让进程等待异步磁盘 I/O，而不忙等占用 CPU。             |
-
-Lab-7 将此前的内存、陷阱、进程和系统调用模块串联为一条可验证的持久化存储路径。
-
-### 7. 验证记录
-
-所有正式测试使用 QEMU 5.1.0 和双 hart：
-
-```bash
-make build
-make run QEMU=/home/shen/opt/qemu-5.1.0/bin/qemu-system-riscv64 CPUNUM=2
-```
-
-```c
-#define N_BUFFER N_BUFFER_TEST
-```
-
-| 测试       | 验证目标                          | 实际结果                                                                                                                                                                  |
-| ---------- | --------------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
-| Test 1     | 读取 superblock 与文件系统初始化  | 双核启动后输出完整磁盘布局和 `hello, world!`。                                                                                                                            |
-| Test 2     | data/inode bitmap 申请与释放      | data block 依次为 1067--1086；释放偶数下标后保留 1068、1070、…、1086；全部释放后为空。inode 依次为 0--19，释放后为空。                                                    |
-| Test 3     | block 持久化、buffer 链表与 flush | block 5000 写入后清理内存副本仍读回 `ABCDEFGH`；state-4 获取顺序为 5000、5003、5007、5002、5004；state-6 被 flush 的 inactive buffer 显示 `page(pa = 0)` 和 `block[-1]`。 |
-| Lab-6 回归 | 调度、睡眠、退出与等待            | 依次输出 `Ready to sleep!`、`Ready to exit!`、`Child exit!`，无 panic。                                                                                                   |
 
 Test 1：
 
-![Lab-7 Test1](pictures/lab-7-test-1.png)
+![Lab-8 Test1](pictures/lab-8-test-1-inode.png)
 
 Test 2：
 
-![Lab-7 Test2](pictures/lab-7-test-2.png)
+![Lab-8 Test2](pictures/lab-8-test-2-index.png)
 
 Test 3：
 
-![Lab-7 Test3](pictures/lab-7-test-3.png)
+![Lab-8 Test3](pictures/lab-8-test-3-dentry.png)
 
-Lab-6 回归：
+Test 4：
 
-![Lab-7 Test4](pictures/lab-7-test-4.png)
+![Lab-8 Test4](pictures/lab-8-test-4-path.png)
