@@ -63,8 +63,8 @@ static uint32 device_null_write(uint32 len, uint64 src, bool is_user_src)
 	return len;
 }
 
-/* 个性化问答设备 */
-static uint32 device_chao_write(uint32 len, uint64 src, bool is_user_src)
+/* 彩蛋: 笨蛋GPT */
+static uint32 device_gpt0_write(uint32 len, uint64 src, bool is_user_src)
 {
 	char tmp[STR_MAXLEN + 1];
 	proc_t *p = myproc();
@@ -80,7 +80,7 @@ static uint32 device_chao_write(uint32 len, uint64 src, bool is_user_src)
 		memmove(tmp, (void*)src, len);
 
 	if (strncmp(tmp, "Hello", len) == 0) {
-		printf("Hi, I am chao!\n");
+		printf("Hi, I am gpt0!\n");
 	} else if (strncmp(tmp, "Guess who I am", len) == 0) {
 		printf("Your procid is %d and name is %s.\n", p->pid, p->name);
 	} else if (strncmp(tmp, "How many free memory left", len) == 0) {
@@ -138,7 +138,7 @@ void device_init()
 	device_register(INODE_MAJOR_STDERR, "stderr", NULL, device_stderr_write);
 	device_register(INODE_MAJOR_ZERO, "zero", device_zero_read, NULL);
 	device_register(INODE_MAJOR_NULL, "null", device_null_read, device_null_write);
-	device_register(INODE_MAJOR_CHAO, "chao", NULL, device_chao_write);
+	device_register(INODE_MAJOR_GPT0, "gpt0", NULL, device_gpt0_write);
 
 	/* 节点在干净镜像中创建，在重复启动时复用并验证。 */
 	inode_t *ip = device_ensure_inode("/dev", INODE_TYPE_DIR,
@@ -159,8 +159,8 @@ void device_init()
 	ip = device_ensure_inode("/dev/null", INODE_TYPE_DIVICE,
 		INODE_MAJOR_NULL, INODE_MINOR_DEFAULT);
 	inode_put(ip);
-	ip = device_ensure_inode("/dev/chao", INODE_TYPE_DIVICE,
-		INODE_MAJOR_CHAO, INODE_MINOR_DEFAULT);
+	ip = device_ensure_inode("/dev/gpt0", INODE_TYPE_DIVICE,
+		INODE_MAJOR_GPT0, INODE_MINOR_DEFAULT);
 	inode_put(ip);
 }
 

@@ -1,6 +1,6 @@
 /*
 	测试四 设备文件的操作
-	/dev/null /dev/zero /dev/chao
+	/dev/null /dev/zero /dev/gpt0
 */
 #include "help.h"
 
@@ -54,7 +54,7 @@ void main(int argc, char *argv[])
 	}
 	sys_close(fd2);
 
-	fd2 = sys_open("chao", OPEN_WRITE);
+	fd2 = sys_open("gpt0", OPEN_WRITE);
 	for (int i = 1; i <= 4; i++) {
 		fprintf(STDOUT, "Q%d: ", i);
 		len = stdin(str, MAXLEN_STR);

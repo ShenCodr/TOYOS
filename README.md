@@ -1,42 +1,3 @@
-## Lab-8：文件系统之上层抽象
-
-### 1. 实验目标与实现
-
-Lab-8 在 Lab-7 的 VirtIO、buffer cache、superblock 和 bitmap 之上，补齐 inode、目录项（dentry）和绝对路径解析，使磁盘块能够组织成普通文件与多层目录。实现包含 64 项 inode cache、inode 磁盘元数据同步、10 个直接索引、2 个一级间接索引和 1 个二级间接索引；目录项固定为 64B，支持名称查找、创建、删除以及 `.`、`..` 根目录初始化
-
-inode 数据读写按逻辑块分段，经 buffer cache 访问磁盘；新建索引块先清零再写盘，删除 inode 时递归释放数据块和各级索引块。普通文件拒绝产生空洞的 `offset > size` 写入，并用无溢出方式检查 `INODE_MAX_SIZE`。路径解析从 inode 0 开始，支持连续 `/`；失败路径会释放已经取得的 inode 引用
-
-复查阶段额外确认：新分配的数据块会清零，索引块分配失败不会把无效块号留在 inode 中，目录项创建会拒绝超出 superblock 范围的 inode 号；删除后重新分配同一数据块的隔离测试已读回零填充
-
-mkfs 已预置根目录 inode 0、`ABCD.txt` inode 1 和 `abcd.txt` inode 2，并保留 64 位 `off_t` 块偏移计算，确保 5GB 镜像可以从干净构建中正确生成。Makefile 同时依赖 `mkfs.c` 与 `mkfs.h`，源码改变后会重新制盘。
-
-### 2. 验证环境与结果
-
-测试使用双 hart、QEMU 5.1.0、4096B block 和 `N_BUFFER = N_BUFFER_TEST = 8`。每组测试都先精确重建 `target/mkfs/disk.img`，避免持久化目录项互相污染。教师 Test-2 的大文件读取对象在测试前已释放，实际验证时改为仍持有的大文件 inode `ip_2`；大文件源缓冲区使用静态数组，避免环境中物理页不保证连续导致的无关失败。
-
-| 测试   | 验证内容                              | 实际 QEMU 结果                                                                                                                           |
-| ------ | ------------------------------------- | ---------------------------------------------------------------------------------------------------------------------------------------- |
-| Test 1 | inode cache、创建、引用计数与最后释放 | 根 inode 为 0、DIR、size 256；创建 inode 3/4 后 bitmap 为 `0 1 2 3 4`，释放后恢复为 `0 1 2`，无 panic。                                  |
-| Test 2 | 小文件、一级和二级索引、大文件读回    | 小文件 size 16000、直接块 1074--1077；大文件 size 174940000，直接块 1074--1083、一级索引 1084/2109、二级索引 3134，末尾读回 `GHABCDEF`。 |
-| Test 3 | 目录项查找、创建、删除与空槽复用      | 根目录初始项位于 0/64/128/192，新目录写入偏移 256，删除后恢复四个初始项，并正确读回预置文件内容。                                        |
-| Test 4 | 多层绝对路径与父目录解析              | `name=file.txt`；目标 inode 5、父目录 inode 4，文件 size 22、数据块 1076，读回 `This is file context!`。                                 |
-
-Test 1：
-
-![Lab-8 Test1](pictures/lab-8-test-1-inode.png)
-
-Test 2：
-
-![Lab-8 Test2](pictures/lab-8-test-2-index.png)
-
-Test 3：
-
-![Lab-8 Test3](pictures/lab-8-test-3-dentry.png)
-
-Test 4：
-
-![Lab-8 Test4](pictures/lab-8-test-4-path.png)
-
 ## Lab-9：文件系统之文件管理与全系统整合
 
 ### 1. 实验目标
@@ -75,9 +36,9 @@ Lab-8 已有的目录项和绝对路径能力在本实验中补齐为：
 | `/dev/stderr` | 写入前输出 `ERROR: ` | 只写 |
 | `/dev/zero` | 返回任意长度的零字节 | 只读 |
 | `/dev/null` | 读返回 0 字节，写接受全部数据 | 读写 |
-| `/dev/chao` | 对四个预设问题给出回答 | 只写 |
+| `/dev/gpt0` | 对四个预设问题给出回答 | 只写 |
 
-教师骨架采用原实验命名；本实现按个人实验约定改为 `/dev/chao`，保留主设备号 7、只写权限和四个问答分支，设备文件测试的覆盖范围不变。
+本实现遵循教师原始命名，保留主设备号 7、只写权限和四个问答分支，设备文件测试的覆盖范围不变。
 
 `device_open_check` 按主设备号和读写模式检查接口是否存在；普通文件层不直接假设设备的读写能力，从而避免打开只支持单向操作的设备。
 
@@ -168,7 +129,7 @@ fork + exec + 用户态 test_1~test_4
 | Test 1 | exec 参数、argc/argv、stdin、stdout、stderr | 输入 `final audit input` 后得到原文回显、`ERROR: final audit input` 和 `test sucess`；参数为 `test_1/111/222/333`。 |
 | Test 2 | root fstat、普通文件 500 次写入、lseek 回读、目录项枚举、dup/close、mmap 清理 | root inode 为 0、size 为 448；`ABC.txt` inode 为 12、size/offset 为 12390；读回尾部包含 `498` 和 `499`，目录项顺序正确，最后映射为空。 |
 | Test 3 | cwd、mkdir、相对路径、硬链接、fstat、unlink | cwd 依次为 `/`、`/new_workdir`、`/new_workdir/2025_12_22/19:00`、`/`；读回 `hello world!`，`hello.txt` 的 nlink 为 2，删除后根目录恢复。 |
-| Test 4 | `/dev` 目录、zero/null、chao | 列出七个 `/dev` 条目并读到 32 个零值；输入 `Hello`、`Guess who I am`、`How many free memory left`、`Good job` 分别覆盖 chao 四个合法分支，最终输出 `test sucess`。 |
+| Test 4 | `/dev` 目录、zero/null、gpt0 | 列出七个 `/dev` 条目并读到 32 个零值；输入 `Hello`、`Guess who I am`、`How many free memory left`、`Good job` 分别覆盖 gpt0 四个合法分支，最终输出 `test sucess`。 |
 
 另外使用临时用户态断言补测了三类失败边界：已映射区间的重叠 `mmap`、未映射或超范围的 `munmap` 均返回 `-1`；以 `OPEN_WRITE` 打开根目录被拒绝。临时测试代码已在验证后移除，没有进入最终源码。
 

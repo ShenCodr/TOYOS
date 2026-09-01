@@ -146,7 +146,7 @@ typedef struct super_block {
 #define INODE_MAJOR_STDERR    4              // 参观设备文件 (/dev/stderr, 可写)
 #define INODE_MAJOR_ZERO      5              // 特殊设备文件 (/dev/zero, 可读)
 #define INODE_MAJOR_NULL      6              // 特殊设备文件 (/dev/null, 可读可写)
-#define INODE_MAJOR_CHAO      7              // 特殊设备文件 (/dev/chao, 可写)
+#define INODE_MAJOR_GPT0      7              // 特殊设备文件 (/dev/gpt0, 可写)
 #define INODE_MINOR_DEFAULT   1              // 默认的次设备号 (所有文件都使用它)
 
 /* index字段相关 */
