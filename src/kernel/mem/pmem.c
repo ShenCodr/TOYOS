@@ -80,3 +80,18 @@ void pmem_free(uint64 page, bool in_kernel)
 
     spinlock_release(&region->lk);
 }
+
+// 获取两个物理页池当前可分配的页数
+void pmem_stat(uint32 *free_pages_in_kernel, uint32 *free_pages_in_user)
+{
+    assert(free_pages_in_kernel != NULL && free_pages_in_user != NULL,
+           "pmem_stat: NULL output");
+
+    spinlock_acquire(&kern_region.lk);
+    *free_pages_in_kernel = kern_region.allocable;
+    spinlock_release(&kern_region.lk);
+
+    spinlock_acquire(&user_region.lk);
+    *free_pages_in_user = user_region.allocable;
+    spinlock_release(&user_region.lk);
+}

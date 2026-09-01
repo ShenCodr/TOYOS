@@ -1,7 +1,248 @@
 #include "mod.h"
+#include "../lib/method.h"
+#include "../proc/method.h"
 
 super_block_t sb;
 
+file_t file_table[N_FILE];
+spinlock_t lk_file_table;
+
+void file_init()
+{
+    spinlock_init(&lk_file_table, "file_table");
+    for (uint32 i = 0; i < N_FILE; i++) {
+        file_table[i].ip = NULL;
+        file_table[i].readable = false;
+        file_table[i].writbale = false;
+        file_table[i].offset = 0;
+        file_table[i].ref = 0;
+    }
+}
+
+file_t *file_alloc()
+{
+    spinlock_acquire(&lk_file_table);
+    for (uint32 i = 0; i < N_FILE; i++) {
+        file_t *file = &file_table[i];
+        if (file->ref != 0)
+            continue;
+
+        file->ip = NULL;
+        file->readable = false;
+        file->writbale = false;
+        file->offset = 0;
+        file->ref = 1;
+        spinlock_release(&lk_file_table);
+        return file;
+    }
+    spinlock_release(&lk_file_table);
+    return NULL;
+}
+
+file_t *file_open(char *path, uint32 open_mode)
+{
+    if (path == NULL)
+        return NULL;
+    if ((open_mode & ~(FILE_OPEN_CREATE | FILE_OPEN_READ |
+                       FILE_OPEN_WRITE)) != 0)
+        return NULL;
+    if ((open_mode & (FILE_OPEN_READ | FILE_OPEN_WRITE)) == 0)
+        return NULL;
+
+    inode_t *ip = path_to_inode(path);
+    if (ip == NULL && (open_mode & FILE_OPEN_CREATE))
+        ip = path_create_inode(path, INODE_TYPE_DATA,
+                               INODE_MAJOR_DEFAULT, INODE_MINOR_DEFAULT);
+    if (ip == NULL)
+        return NULL;
+
+    inode_lock(ip);
+    uint16 type = ip->disk_info.type;
+    uint16 major = ip->disk_info.major;
+    inode_unlock(ip);
+
+    if (type == INODE_TYPE_DIVICE) {
+        if ((open_mode & FILE_OPEN_CREATE) ||
+            !device_open_check(major,
+                               open_mode & (FILE_OPEN_READ | FILE_OPEN_WRITE))) {
+            inode_put(ip);
+            return NULL;
+        }
+    } else if (type == INODE_TYPE_DIR &&
+               (open_mode & FILE_OPEN_WRITE)) {
+        inode_put(ip);
+        return NULL;
+    } else if (type != INODE_TYPE_DATA && type != INODE_TYPE_DIR) {
+        inode_put(ip);
+        return NULL;
+    }
+
+    file_t *file = file_alloc();
+    if (file == NULL) {
+        inode_put(ip);
+        return NULL;
+    }
+
+    file->ip = ip;
+    file->readable = (open_mode & FILE_OPEN_READ) != 0;
+    file->writbale = (open_mode & FILE_OPEN_WRITE) != 0;
+    file->offset = 0;
+    return file;
+}
+
+void file_close(file_t *file)
+{
+    if (file == NULL)
+        return;
+
+    inode_t *ip = NULL;
+    spinlock_acquire(&lk_file_table);
+    assert(file->ref > 0, "file_close: invalid file");
+    file->ref--;
+    if (file->ref == 0) {
+        ip = file->ip;
+        file->ip = NULL;
+        file->readable = false;
+        file->writbale = false;
+        file->offset = 0;
+    }
+    spinlock_release(&lk_file_table);
+
+    if (ip != NULL)
+        inode_put(ip);
+}
+
+uint32 file_read(file_t *file, uint32 len, uint64 dst, bool is_user_dst)
+{
+    if (file == NULL || file->ref == 0 || file->ip == NULL ||
+        !file->readable)
+        return 0;
+
+    inode_t *ip = file->ip;
+    uint32 read_len = 0;
+    uint16 type;
+    uint16 major;
+
+    inode_lock(ip);
+    type = ip->disk_info.type;
+    major = ip->disk_info.major;
+
+    if (type == INODE_TYPE_DIVICE) {
+        inode_unlock(ip);
+        read_len = device_read_data(major, len, dst, is_user_dst);
+    } else if (type == INODE_TYPE_DATA) {
+        read_len = inode_read_data(ip, file->offset, len,
+                                   (void *)dst, is_user_dst);
+        file->offset += read_len;
+        inode_unlock(ip);
+    } else if (type == INODE_TYPE_DIR) {
+        read_len = dentry_transmit(ip, dst, len, is_user_dst);
+        file->offset += read_len;
+        inode_unlock(ip);
+    } else {
+        inode_unlock(ip);
+    }
+
+    if (type == INODE_TYPE_DIVICE)
+        file->offset += read_len;
+    return read_len;
+}
+
+uint32 file_write(file_t *file, uint32 len, uint64 src, bool is_user_src)
+{
+    if (file == NULL || file->ref == 0 || file->ip == NULL ||
+        !file->writbale)
+        return 0;
+
+    inode_t *ip = file->ip;
+    uint32 write_len = 0;
+    uint16 type;
+    uint16 major;
+
+    inode_lock(ip);
+    type = ip->disk_info.type;
+    major = ip->disk_info.major;
+
+    if (type == INODE_TYPE_DIVICE) {
+        inode_unlock(ip);
+        write_len = device_write_data(major, len, src, is_user_src);
+    } else if (type == INODE_TYPE_DATA) {
+        write_len = inode_write_data(ip, file->offset, len,
+                                     (void *)src, is_user_src);
+        file->offset += write_len;
+        inode_unlock(ip);
+    } else {
+        inode_unlock(ip);
+    }
+
+    if (type == INODE_TYPE_DIVICE)
+        file->offset += write_len;
+    return write_len;
+}
+
+uint32 file_lseek(file_t *file, uint32 lseek_offset, uint32 lseek_flag)
+{
+    if (file == NULL || file->ref == 0)
+        return (uint32)-1;
+
+    uint64 next;
+    switch (lseek_flag) {
+    case FILE_LSEEK_SET:
+        next = lseek_offset;
+        break;
+    case FILE_LSEEK_ADD:
+        next = (uint64)file->offset + lseek_offset;
+        if (next > INODE_MAX_SIZE)
+            next = INODE_MAX_SIZE;
+        break;
+    case FILE_LSEEK_SUB:
+        next = file->offset > lseek_offset ?
+               file->offset - lseek_offset : 0;
+        break;
+    default:
+        return (uint32)-1;
+    }
+
+    file->offset = (uint32)next;
+    return file->offset;
+}
+
+file_t *file_dup(file_t *file)
+{
+    if (file == NULL)
+        return NULL;
+
+    spinlock_acquire(&lk_file_table);
+    if (file->ref == 0) {
+        spinlock_release(&lk_file_table);
+        return NULL;
+    }
+    file->ref++;
+    spinlock_release(&lk_file_table);
+    return file;
+}
+
+uint32 file_get_stat(file_t *file, uint64 user_dst)
+{
+    if (file == NULL || file->ref == 0 || file->ip == NULL ||
+        user_dst == 0)
+        return (uint32)-1;
+
+    inode_t *ip = file->ip;
+    file_stat_t stat;
+
+    inode_lock(ip);
+    stat.type = ip->disk_info.type;
+    stat.nlink = ip->disk_info.nlink;
+    stat.size = ip->disk_info.size;
+    stat.inode_num = ip->inode_num;
+    stat.offset = file->offset;
+    uvm_copyout(myproc()->pgtbl, user_dst, (uint64)&stat, sizeof(stat));
+    inode_unlock(ip);
+    return 0;
+}
+
+/* 基于 superblock 输出磁盘布局信息（for debug） */
 static void sb_print()
 {
     printf("\ndisk layout information:\n");
@@ -16,13 +257,15 @@ static void sb_print()
            sb.data_firstblock + sb.data_blocks - 1);
     printf("block size = %d Byte, total size = %d MB, total inode = %d\n\n",
            sb.block_size,
-           (int)((unsigned long long)sb.total_blocks * sb.block_size / 1024 / 1024),
+           (int)((unsigned long long)sb.total_blocks * sb.block_size /
+                 1024 / 1024),
            sb.total_inodes);
 }
 
 void fs_init()
 {
     buffer_init();
+
     buffer_t *buf = buffer_get(FS_SB_BLOCK);
     memmove(&sb, buf->data, sizeof(sb));
     buffer_put(buf);
@@ -43,66 +286,7 @@ void fs_init()
            "fs_init: invalid total blocks");
 
     inode_init();
+    file_init();
+    device_init();
     sb_print();
-    printf("============= test begin =============\n\n");
-
-    inode_t *rooti, *ip_1, *ip_2, *ip_3, *ip_4, *ip_5;
-    rooti = inode_get(ROOT_INODE);
-    ip_1 = inode_create(INODE_TYPE_DIR, INODE_MAJOR_DEFAULT, INODE_MINOR_DEFAULT);
-    ip_2 = inode_create(INODE_TYPE_DIR, INODE_MAJOR_DEFAULT, INODE_MINOR_DEFAULT);
-    ip_3 = inode_create(INODE_TYPE_DATA, INODE_MAJOR_DEFAULT, INODE_MINOR_DEFAULT);
-
-    inode_lock(rooti);
-    inode_lock(ip_1);
-    inode_lock(ip_2);
-    inode_lock(ip_3);
-
-    assert(dentry_create(rooti, ip_1->inode_num, "AABBC") != INVALID_INODE_NUM,
-           "dentry_create fail 1!");
-    assert(dentry_create(ip_1, ip_2->inode_num, "aaabb") != INVALID_INODE_NUM,
-           "dentry_create fail 2!");
-    assert(dentry_create(ip_2, ip_3->inode_num, "file.txt") != INVALID_INODE_NUM,
-           "dentry_create fail 3!");
-
-    char tmp1[] = "This is file context!";
-    char tmp2[32];
-    inode_write_data(ip_3, 0, sizeof(tmp1), tmp1, false);
-
-    inode_rw(rooti, true);
-    inode_rw(ip_1, true);
-    inode_rw(ip_2, true);
-
-    inode_unlock(rooti);
-    inode_unlock(ip_1);
-    inode_unlock(ip_2);
-    inode_unlock(ip_3);
-    inode_put(rooti);
-    inode_put(ip_1);
-    inode_put(ip_2);
-    inode_put(ip_3);
-
-    char *path = "///AABBC///aaabb/file.txt";
-    char name[MAXLEN_FILENAME];
-    ip_4 = path_to_inode(path);
-    if (ip_4 == NULL)
-        panic("invalid ip_4");
-    ip_5 = path_to_parent_inode(path, name);
-    if (ip_5 == NULL)
-        panic("invalid ip_5");
-    printf("get a name = %s\n\n", name);
-
-    inode_lock(ip_4);
-    inode_lock(ip_5);
-    inode_print(ip_4, "file.txt");
-    inode_print(ip_5, "aaabb");
-    inode_read_data(ip_4, 0, 32, tmp2, false);
-    printf("read data: %s\n\n", tmp2);
-    inode_unlock(ip_4);
-    inode_unlock(ip_5);
-    inode_put(ip_4);
-    inode_put(ip_5);
-
-    printf("============= test end =============\n");
-    while (1)
-        ;
 }

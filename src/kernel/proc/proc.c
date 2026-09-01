@@ -46,8 +46,16 @@ static void proc_return()
     proc_t *p = myproc();
 
     spinlock_release(&p->lk);
-    if (p == proczero)
+    if (p == proczero) {
         fs_init();
+        p->open_file[0] = file_open("/dev/stdin", FILE_OPEN_READ);
+        p->open_file[1] = file_open("/dev/stdout", FILE_OPEN_WRITE);
+        p->open_file[2] = file_open("/dev/stderr", FILE_OPEN_WRITE);
+        assert(p->open_file[0] != NULL && p->open_file[1] != NULL &&
+               p->open_file[2] != NULL,
+               "proc_return: open standard files failed");
+        p->cwd = inode_get(ROOT_INODE);
+    }
 
     trap_user_return();
 }
@@ -91,6 +99,9 @@ proc_t *proc_alloc()
         p->heap_top = 0;
         p->ustack_npage = 0;
         p->mmap = NULL;
+        p->cwd = NULL;
+        for (uint32 j = 0; j < N_OPEN_FILE_PER_PROC; j++)
+            p->open_file[j] = NULL;
 
         p->tf = (trapframe_t *)pmem_alloc(false);
         assert(p->tf != NULL, "proc_alloc: alloc trapframe failed");
@@ -114,6 +125,17 @@ void proc_free(proc_t *p)
 {
     assert(spinlock_holding(&p->lk), "proc_free: lock not held");
 
+    for (uint32 i = 0; i < N_OPEN_FILE_PER_PROC; i++) {
+        if (p->open_file[i] != NULL) {
+            file_close(p->open_file[i]);
+            p->open_file[i] = NULL;
+        }
+    }
+    if (p->cwd != NULL) {
+        inode_put(p->cwd);
+        p->cwd = NULL;
+    }
+
     if (p->pgtbl != NULL) {
         uvm_destroy_pgtbl(p->pgtbl);
         p->pgtbl = NULL;
@@ -133,6 +155,9 @@ void proc_free(proc_t *p)
     p->sleep_space = NULL;
     p->heap_top = 0;
     p->ustack_npage = 0;
+    p->cwd = NULL;
+    for (uint32 i = 0; i < N_OPEN_FILE_PER_PROC; i++)
+        p->open_file[i] = NULL;
     memset(&p->ctx, 0, sizeof(p->ctx));
 
     p->state = UNUSED;
@@ -247,6 +272,14 @@ int proc_fork()
 
     memmove(child->name, parent->name, sizeof(child->name));
     child->parent = parent;
+    child->cwd = parent->cwd == NULL ? NULL : inode_dup(parent->cwd);
+    for (uint32 i = 0; i < N_OPEN_FILE_PER_PROC; i++) {
+        if (parent->open_file[i] != NULL) {
+            child->open_file[i] = file_dup(parent->open_file[i]);
+            assert(child->open_file[i] != NULL,
+                   "proc_fork: duplicate file failed");
+        }
+    }
 
     int child_pid = child->pid;
     child->state = RUNNABLE;

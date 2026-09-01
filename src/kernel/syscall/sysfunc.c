@@ -28,7 +28,7 @@ uint64 sys_brk()
 
         ret_heap_top = uvm_heap_grow(p->pgtbl,
                                      p->heap_top,
-                                     (uint32)change_len);
+                                     (uint32)change_len, PTE_R | PTE_W);
         if (ret_heap_top == (uint64)-1)
             return (uint64)-1;
 
@@ -115,6 +115,22 @@ uint64 sys_mmap()
             return (uint64)-1;
     }
 
+    if (start != 0)
+    {
+        uint64 requested_end = start + len;
+        for (mmap_region_t *region = p->mmap;
+             region != NULL;
+             region = region->next)
+        {
+            uint64 region_end = region->begin +
+                                (uint64)region->npages * PGSIZE;
+            if (region_end < region->begin || region_end > MMAP_END)
+                return (uint64)-1;
+            if (start < region_end && region->begin < requested_end)
+                return (uint64)-1;
+        }
+    }
+
     uvm_mmap(start,
              len / PGSIZE,
              PTE_R | PTE_W | PTE_U);
@@ -152,6 +168,25 @@ uint64 sys_munmap()
     if ((uint64)len > MMAP_END - start)
         return (uint64)-1;
 
+    uint64 requested_end = start + len;
+    bool mapped = false;
+    for (mmap_region_t *region = p->mmap;
+         region != NULL;
+         region = region->next)
+    {
+        uint64 region_end = region->begin +
+                            (uint64)region->npages * PGSIZE;
+        if (region_end < region->begin || region_end > MMAP_END)
+            return (uint64)-1;
+        if (region->begin <= start && requested_end <= region_end)
+        {
+            mapped = true;
+            break;
+        }
+    }
+    if (!mapped)
+        return (uint64)-1;
+
     uvm_munmap(start, len / PGSIZE);
 
     // Task 4 提示性输出
@@ -161,28 +196,6 @@ uint64 sys_munmap()
 
     return 0;
 }
-// 打印用户态字符串
-uint64 sys_print_str()
-{
-    char str[STR_MAXLEN];
-
-    arg_str(0, str, STR_MAXLEN);
-    printf("%s", str);
-
-    return 0;
-}
-
-// 打印一个 32 位整数
-uint64 sys_print_int()
-{
-    uint32 num;
-
-    arg_uint32(0, &num);
-    printf("%d\n", (int)num);
-
-    return 0;
-}
-
 // 获取当前进程 PID
 uint64 sys_getpid()
 {
@@ -228,117 +241,243 @@ uint64 sys_sleep()
     return 0;
 }
 
-/* 从 data bitmap 申请一个块。 */
-uint64 sys_alloc_block()
+/* 执行用户态 ELF，并在调用返回前复制好用户 argv。 */
+uint64 sys_exec()
 {
-    return bitmap_alloc_block();
-}
+    proc_t *p = myproc();
+    char path[STR_MAXLEN];
+    uint64 argv_addr;
+    char *argv[ELF_MAXARGS + 1];
+    uint64 storage_page;
+    uint32 argc;
 
-/* 释放指定 data block。 */
-uint64 sys_free_block()
-{
-    uint32 block_num;
-
-    arg_uint32(0, &block_num);
-    bitmap_free_block(block_num);
-    return 0;
-}
-
-/* 从 inode bitmap 申请一个 inode。 */
-uint64 sys_alloc_inode()
-{
-    return bitmap_alloc_inode();
-}
-
-/* 释放指定 inode。 */
-uint64 sys_free_inode()
-{
-    uint32 inode_num;
-
-    arg_uint32(0, &inode_num);
-    bitmap_free_inode(inode_num);
-    return 0;
-}
-
-/* 用户接口约定：0=data bitmap，1=inode bitmap。 */
-uint64 sys_show_bitmap()
-{
-    uint32 choose_bitmap;
-
-    arg_uint32(0, &choose_bitmap);
-    if (choose_bitmap > 1)
+    arg_str(0, path, STR_MAXLEN);
+    arg_uint64(1, &argv_addr);
+    if (argv_addr == 0)
         return (uint64)-1;
 
-    bitmap_print(choose_bitmap == 0);
-    return 0;
+    storage_page = (uint64)pmem_alloc(true);
+    argc = 0;
+    for (; argc < ELF_MAXARGS; argc++) {
+        uint64 user_arg;
+        uint64 slot_addr = argv_addr + (uint64)argc * sizeof(uint64);
+        if (slot_addr < argv_addr || slot_addr + sizeof(uint64) > VA_MAX) {
+            pmem_free(storage_page, true);
+            return (uint64)-1;
+        }
+        uvm_copyin(p->pgtbl, (uint64)&user_arg, slot_addr,
+                   sizeof(user_arg));
+        if (user_arg == 0)
+            break;
+        argv[argc] = (char *)(storage_page + (uint64)argc * ELF_MAXARG_LEN);
+        uvm_copyin_str(p->pgtbl, (uint64)argv[argc], user_arg,
+                       ELF_MAXARG_LEN);
+    }
+    if (argc == ELF_MAXARGS) {
+        uint64 user_arg;
+        uint64 slot_addr = argv_addr + (uint64)argc * sizeof(uint64);
+        if (slot_addr < argv_addr || slot_addr + sizeof(uint64) > VA_MAX) {
+            pmem_free(storage_page, true);
+            return (uint64)-1;
+        }
+        uvm_copyin(p->pgtbl, (uint64)&user_arg, slot_addr,
+                   sizeof(user_arg));
+        if (user_arg != 0) {
+            pmem_free(storage_page, true);
+            return (uint64)-1;
+        }
+    }
+    argv[argc] = NULL;
+
+    uint64 ret = proc_exec(path, argv);
+    pmem_free(storage_page, true);
+    return ret;
 }
 
-/* 获取并保持指定块对应的 buffer 锁。 */
-uint64 sys_get_block()
-{
-    uint32 block_num;
-
-    arg_uint32(0, &block_num);
-    return (uint64)buffer_get(block_num);
-}
-
-/* 将 buffer 的完整块复制到用户空间。 */
-uint64 sys_read_block()
+static uint32 alloc_fd(file_t *file)
 {
     proc_t *p = myproc();
-    uint64 addr_buf, addr_data;
+    for (uint32 i = 0; i < N_OPEN_FILE_PER_PROC; i++) {
+        if (p->open_file[i] == NULL) {
+            p->open_file[i] = file;
+            return i;
+        }
+    }
+    return (uint32)-1;
+}
 
-    arg_uint64(0, &addr_buf);
-    arg_uint64(1, &addr_data);
-    buffer_t *buf = (buffer_t *)addr_buf;
+uint64 sys_open()
+{
+    char path[STR_MAXLEN];
+    uint32 open_mode;
+    arg_str(0, path, STR_MAXLEN);
+    arg_uint32(1, &open_mode);
 
-    assert(buf != NULL, "sys_read_block: NULL buffer");
-    assert(sleeplock_holding(&buf->slk), "sys_read_block: buffer not locked");
-    uvm_copyout(p->pgtbl, addr_data, (uint64)buf->data, BLOCK_SIZE);
+    file_t *file = file_open(path, open_mode);
+    if (file == NULL)
+        return (uint64)-1;
+
+    uint32 fd = alloc_fd(file);
+    if (fd == (uint32)-1) {
+        file_close(file);
+        return (uint64)-1;
+    }
+    return fd;
+}
+
+uint64 sys_close()
+{
+    uint32 fd;
+    file_t *file;
+    if (arg_fd(0, &fd, &file) < 0)
+        return (uint64)-1;
+    myproc()->open_file[fd] = NULL;
+    file_close(file);
     return 0;
 }
 
-/* 从用户空间复制完整块并写回磁盘。 */
-uint64 sys_write_block()
+uint64 sys_read()
+{
+    file_t *file;
+    uint32 len;
+    uint64 dst;
+    if (arg_fd(0, NULL, &file) < 0)
+        return 0;
+    arg_uint32(1, &len);
+    arg_uint64(2, &dst);
+    return file_read(file, len, dst, true);
+}
+
+uint64 sys_write()
+{
+    file_t *file;
+    uint32 len;
+    uint64 src;
+    if (arg_fd(0, NULL, &file) < 0)
+        return 0;
+    arg_uint32(1, &len);
+    arg_uint64(2, &src);
+    return file_write(file, len, src, true);
+}
+
+uint64 sys_lseek()
+{
+    file_t *file;
+    uint32 offset, flag;
+    if (arg_fd(0, NULL, &file) < 0)
+        return (uint64)-1;
+    arg_uint32(1, &offset);
+    arg_uint32(2, &flag);
+    return file_lseek(file, offset, flag);
+}
+
+uint64 sys_dup()
+{
+    file_t *file;
+    if (arg_fd(0, NULL, &file) < 0)
+        return (uint64)-1;
+
+    file_t *dup = file_dup(file);
+    if (dup == NULL)
+        return (uint64)-1;
+    uint32 fd = alloc_fd(dup);
+    if (fd == (uint32)-1) {
+        file_close(dup);
+        return (uint64)-1;
+    }
+    return fd;
+}
+
+uint64 sys_fstat()
+{
+    file_t *file;
+    uint64 user_dst;
+    if (arg_fd(0, NULL, &file) < 0)
+        return (uint64)-1;
+    arg_uint64(1, &user_dst);
+    return file_get_stat(file, user_dst);
+}
+
+uint64 sys_get_dentries()
+{
+    file_t *file;
+    uint32 len;
+    uint64 dst;
+    if (arg_fd(0, NULL, &file) < 0)
+        return (uint64)-1;
+    arg_uint64(1, &dst);
+    arg_uint32(2, &len);
+
+    inode_lock(file->ip);
+    bool is_dir = file->ip->disk_info.type == INODE_TYPE_DIR;
+    inode_unlock(file->ip);
+    if (!is_dir || !file->readable)
+        return (uint64)-1;
+    return file_read(file, len, dst, true);
+}
+
+uint64 sys_mkdir()
+{
+    char path[STR_MAXLEN];
+    arg_str(0, path, STR_MAXLEN);
+    inode_t *ip = path_create_inode(path, INODE_TYPE_DIR,
+                                    INODE_MAJOR_DEFAULT,
+                                    INODE_MINOR_DEFAULT);
+    if (ip == NULL)
+        return (uint64)-1;
+    inode_put(ip);
+    return 0;
+}
+
+uint64 sys_chdir()
+{
+    char path[STR_MAXLEN];
+    arg_str(0, path, STR_MAXLEN);
+    inode_t *ip = path_to_inode(path);
+    if (ip == NULL)
+        return (uint64)-1;
+
+    inode_lock(ip);
+    bool is_dir = ip->disk_info.type == INODE_TYPE_DIR;
+    inode_unlock(ip);
+    if (!is_dir) {
+        inode_put(ip);
+        return (uint64)-1;
+    }
+
+    proc_t *p = myproc();
+    inode_t *old = p->cwd;
+    p->cwd = ip;
+    if (old != NULL)
+        inode_put(old);
+    return 0;
+}
+
+uint64 sys_print_cwd()
 {
     proc_t *p = myproc();
-    uint64 addr_buf, addr_data;
-
-    arg_uint64(0, &addr_buf);
-    arg_uint64(1, &addr_data);
-    buffer_t *buf = (buffer_t *)addr_buf;
-
-    assert(buf != NULL, "sys_write_block: NULL buffer");
-    assert(sleeplock_holding(&buf->slk), "sys_write_block: buffer not locked");
-    uvm_copyin(p->pgtbl, (uint64)buf->data, addr_data, BLOCK_SIZE);
-    buffer_write(buf);
+    char path[STR_MAXLEN];
+    if (p->cwd == NULL)
+        return (uint64)-1;
+    uint32 offset = inode_to_path(p->cwd, path, sizeof(path));
+    if (offset == (uint32)-1)
+        return (uint64)-1;
+    printf("%s\n", path + offset);
     return 0;
 }
 
-/* 归还通过 sys_get_block 获得的 buffer。 */
-uint64 sys_put_block()
+uint64 sys_link()
 {
-    uint64 addr_buf;
-
-    arg_uint64(0, &addr_buf);
-    buffer_t *buf = (buffer_t *)addr_buf;
-
-    assert(buf != NULL, "sys_put_block: NULL buffer");
-    buffer_put(buf);
-    return 0;
+    char old_path[STR_MAXLEN];
+    char new_path[STR_MAXLEN];
+    arg_str(0, old_path, STR_MAXLEN);
+    arg_str(1, new_path, STR_MAXLEN);
+    return path_link(old_path, new_path);
 }
 
-uint64 sys_show_buffer()
+uint64 sys_unlink()
 {
-    buffer_print_info();
-    return 0;
-}
-
-uint64 sys_flush_buffer()
-{
-    uint32 buffer_count;
-
-    arg_uint32(0, &buffer_count);
-    buffer_freemem(buffer_count);
-    return 0;
+    char path[STR_MAXLEN];
+    arg_str(0, path, STR_MAXLEN);
+    return path_unlink(path);
 }
